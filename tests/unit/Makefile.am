@@ -25,7 +25,8 @@ UNIT_TESTS = \
 	%D%/test_backtrace \
 	%D%/test_timer \
 	%D%/test_zfs_file \
-	%D%/test_indirect_mapping
+	%D%/test_indirect_mapping \
+	%D%/test_zio_crypt_slot
 
 # extra test binaries. not unit/correctness tests as such, but use the same
 # framework. not run by `make unit`, but will work with `T=` etc
@@ -185,6 +186,18 @@ nodist_%C%_test_indirect_mapping_SOURCES = \
 	%D%/test_indirect_mapping.c
 
 %C%_test_indirect_mapping_LDADD = \
+	libspl.la \
+	libunit.la
+
+
+%C%_test_zio_crypt_slot_CFLAGS = $(AM_CFLAGS) $(LIBTIRPC_CFLAGS)
+
+%C%_test_zio_crypt_slot_SOURCES = \
+	%D%/test_zio_crypt_slot.c
+
+%C%_test_zio_crypt_slot_LDADD = \
+	libzpool.la \
+	libzfs_core.la \
 	libspl.la \
 	libunit.la
 
