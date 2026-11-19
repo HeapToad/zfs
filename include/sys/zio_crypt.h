@@ -102,6 +102,32 @@ int zio_crypt_key_get_salt(zio_crypt_key_t *key, uint8_t *salt_out);
 
 int zio_crypt_key_wrap(crypto_key_t *cwkey, zio_crypt_key_t *key, uint8_t *iv,
     uint8_t *mac, uint8_t *keydata_out, uint8_t *hmac_keydata_out);
+
+/*
+ * Wrap and unwrap a dataset's wrapping key for storage in a key slot.
+ *
+ * A key slot stores the encryption root's wrapping key encrypted under a key
+ * derived from that slot's own passphrase or raw key, so a tree can be unlocked
+ * with any one of several secrets. The ciphertext is authenticated against the
+ * root key GUID, the cipher suite, the on-disk format version and the slot
+ * number, in that order, so a slot entry cannot be moved to another key object,
+ * another suite or another slot number and still authenticate.
+ *
+ * `slot_key` is the slot's key; `wkey` is the root's wrapping key. Both are
+ * WRAPPING_KEY_LEN bytes: wrapping keys are always that length, whatever the
+ * dataset's cipher, which selects only the mode (GCM or CCM). The wkey and
+ * cipher buffers must be at least WRAPPING_KEY_LEN bytes; the IV is generated
+ * by the wrap call.
+ *
+ * Authentication failures are returned as ECKSUM. Callers that surface this to
+ * a user should map it to EACCES, as the existing key loading code does.
+ */
+int zio_crypt_slot_wrap(uint64_t crypt, crypto_key_t *slot_key, uint64_t guid,
+    uint64_t version, uint64_t slot, const uint8_t *wkey, uint8_t *iv,
+    uint8_t *mac, uint8_t *cipher);
+int zio_crypt_slot_unwrap(uint64_t crypt, crypto_key_t *slot_key, uint64_t guid,
+    uint64_t version, uint64_t slot, const uint8_t *cipher, const uint8_t *iv,
+    uint8_t *mac, uint8_t *wkey);
 int zio_crypt_key_unwrap(crypto_key_t *cwkey, uint64_t crypt, uint64_t version,
     uint64_t guid, uint8_t *keydata, uint8_t *hmac_keydata, uint8_t *iv,
     uint8_t *mac, zio_crypt_key_t *key);
