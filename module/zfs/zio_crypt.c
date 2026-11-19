@@ -500,6 +500,120 @@ error:
 }
 
 int
+zio_crypt_slot_wrap(uint64_t crypt, crypto_key_t *slot_key, uint64_t guid,
+    uint64_t version, uint64_t slot, const uint8_t *wkey, uint8_t *iv,
+    uint8_t *mac, uint8_t *cipher)
+{
+	int ret;
+	uint64_t aad[4];
+	const zio_crypt_info_t *ci;
+	zfs_uio_t puio, cuio;
+	int idx;
+
+	if (slot_key == NULL || wkey == NULL || iv == NULL || mac == NULL ||
+	    cipher == NULL)
+		return (SET_ERROR(EINVAL));
+
+	if (crypt >= ZIO_CRYPT_FUNCTIONS)
+		return (SET_ERROR(EINVAL));
+
+	ci = &zio_crypt_table[crypt];
+	if (ci->ci_crypt_type != ZC_TYPE_GCM &&
+	    ci->ci_crypt_type != ZC_TYPE_CCM)
+		return (SET_ERROR(ENOTSUP));
+
+	/*
+	 * The wrapping key is always WRAPPING_KEY_LEN bytes: the suite selects
+	 * the mode, and the AEAD key size follows ck_length. Anything else is a
+	 * caller error and would truncate the key being sealed.
+	 */
+	if (slot_key->ck_length != CRYPTO_BYTES2BITS(WRAPPING_KEY_LEN))
+		return (SET_ERROR(EINVAL));
+
+	/* bind the ciphertext to its key object, suite and slot */
+	aad[0] = LE_64(guid);
+	aad[1] = LE_64(crypt);
+	aad[2] = LE_64(version);
+	aad[3] = LE_64(slot);
+
+	ret = random_get_pseudo_bytes(iv, WRAPPING_IV_LEN);
+	if (ret != 0)
+		return (ret);
+
+	ret = zio_crypt_uios_init_os(&puio, &cuio, 1, &idx);
+	if (ret != 0)
+		return (ret);
+
+	zfs_uio_iovbase(&puio, idx) = (void *)wkey;
+	zfs_uio_iovlen(&puio, idx) = WRAPPING_KEY_LEN;
+	zfs_uio_iovbase(&cuio, idx) = cipher;
+	zfs_uio_iovlen(&cuio, idx) = WRAPPING_KEY_LEN;
+
+	ret = zio_encrypt_os(ci, slot_key, NULL, &puio, &cuio, WRAPPING_KEY_LEN,
+	    iv, (uint8_t *)aad, sizeof (aad), mac);
+
+	zio_crypt_uios_fini_os(&puio, &cuio);
+
+	if (ret != 0)
+		memset(cipher, 0, WRAPPING_KEY_LEN);
+
+	return (ret);
+}
+
+int
+zio_crypt_slot_unwrap(uint64_t crypt, crypto_key_t *slot_key, uint64_t guid,
+    uint64_t version, uint64_t slot, const uint8_t *cipher, const uint8_t *iv,
+    uint8_t *mac, uint8_t *wkey)
+{
+	int ret;
+	uint64_t aad[4];
+	const zio_crypt_info_t *ci;
+	zfs_uio_t cuio, puio;
+	int idx;
+
+	if (slot_key == NULL || cipher == NULL || iv == NULL || mac == NULL ||
+	    wkey == NULL)
+		return (SET_ERROR(EINVAL));
+
+	if (crypt >= ZIO_CRYPT_FUNCTIONS)
+		return (SET_ERROR(EINVAL));
+
+	ci = &zio_crypt_table[crypt];
+	if (ci->ci_crypt_type != ZC_TYPE_GCM &&
+	    ci->ci_crypt_type != ZC_TYPE_CCM)
+		return (SET_ERROR(ENOTSUP));
+
+	if (slot_key->ck_length != CRYPTO_BYTES2BITS(WRAPPING_KEY_LEN))
+		return (SET_ERROR(EINVAL));
+
+	/* must match the wrap call exactly, or authentication fails */
+	aad[0] = LE_64(guid);
+	aad[1] = LE_64(crypt);
+	aad[2] = LE_64(version);
+	aad[3] = LE_64(slot);
+
+	ret = zio_crypt_uios_init_os(&cuio, &puio, 1, &idx);
+	if (ret != 0)
+		return (ret);
+
+	zfs_uio_iovbase(&cuio, idx) = (void *)cipher;
+	zfs_uio_iovlen(&cuio, idx) = WRAPPING_KEY_LEN;
+	zfs_uio_iovbase(&puio, idx) = wkey;
+	zfs_uio_iovlen(&puio, idx) = WRAPPING_KEY_LEN;
+
+	ret = zio_decrypt_os(ci, slot_key, NULL, &cuio, &puio, WRAPPING_KEY_LEN,
+	    iv, (uint8_t *)aad, sizeof (aad), mac);
+
+	zio_crypt_uios_fini_os(&cuio, &puio);
+
+	/* never hand back partially decrypted key material */
+	if (ret != 0)
+		memset(wkey, 0, WRAPPING_KEY_LEN);
+
+	return (ret);
+}
+
+int
 zio_crypt_do_hmac(zio_crypt_key_t *key, uint8_t *data, uint_t datalen,
     uint8_t *digestbuf, uint_t digestlen)
 {
