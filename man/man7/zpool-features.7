@@ -726,6 +726,18 @@ already exist on the receiving side.
 .Pp
 \*[instant-never]
 .
+.feature org.openzfs keyslots no encryption extensible_dataset
+This feature enables additional key slots for natively encrypted datasets.
+A key slot is an independent wrapping of the encryption root's wrapping key,
+so any one of the slot's keys can unlock the dataset's tree.
+.Pp
+This feature becomes
+.Sy active
+when the first additional key slot is written and will never return to being
+.Sy enabled .
+Once it is active, the pool cannot be imported, even read-only, by an
+implementation that does not support this feature.
+.
 .feature org.open-zfs large_blocks no extensible_dataset
 This feature allows the record size on a dataset to be set larger than 128 KiB.
 .Pp

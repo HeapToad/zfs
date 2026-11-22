@@ -640,6 +640,19 @@ zpool_feature_init(void)
 	}
 
 	{
+		static const spa_feature_t keyslots_deps[] = {
+			SPA_FEATURE_ENCRYPTION,
+			SPA_FEATURE_EXTENSIBLE_DATASET,
+			SPA_FEATURE_NONE
+		};
+		zfeature_register(SPA_FEATURE_KEYSLOTS,
+		    "org.openzfs:keyslots", "keyslots",
+		    "Support for multiple key slots per encryption root",
+		    ZFEATURE_FLAG_PER_DATASET, ZFEATURE_TYPE_BOOLEAN,
+		    keyslots_deps, sfeatures);
+	}
+
+	{
 		static const spa_feature_t project_quota_deps[] = {
 			SPA_FEATURE_EXTENSIBLE_DATASET,
 			SPA_FEATURE_NONE
