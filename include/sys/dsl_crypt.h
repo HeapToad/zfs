@@ -225,6 +225,10 @@ int dsl_crypto_key_slot_add_check(struct dsl_dataset *ds,
     dsl_crypto_key_slot_args_t *args);
 void dsl_crypto_key_slot_add_sync(struct dsl_dataset *ds,
     dsl_crypto_key_slot_args_t *args, dmu_tx_t *tx);
+int dsl_crypto_key_slot_remove_check(struct dsl_dataset *ds,
+    dsl_crypto_key_slot_args_t *args);
+void dsl_crypto_key_slot_remove_sync(struct dsl_dataset *ds,
+    dsl_crypto_key_slot_args_t *args, dmu_tx_t *tx);
 int dsl_crypto_key_slot_unwrap(objset_t *mos, uint64_t dckobj, uint64_t slot,
     const crypto_key_t *wkey_n, uint8_t *wkey1_out);
 

@@ -958,6 +958,127 @@ dsl_crypto_key_slot_unwrap(objset_t *mos, uint64_t dckobj, uint64_t slot,
 	    ZIO_CRYPT_KEY_CURRENT_VERSION, slot, cipher, iv, mac, wkey1_out));
 }
 
+/*
+ * Confirm the encryption root's wrapping key is loaded. Removal is
+ * metadata-only, so this is a policy check (D15): it stops a recovery slot
+ * from being removed without the primary key.
+ */
+static int
+dsl_crypto_key_slot_check_wkey_loaded(dsl_dir_t *dd)
+{
+	int ret;
+	dsl_wrapping_key_t *wkey = NULL;
+
+	ret = spa_keystore_wkey_hold_dd(dd->dd_pool->dp_spa, dd, FTAG, &wkey);
+	if (ret != 0)
+		return (SET_ERROR(EACCES));
+
+	dsl_wrapping_key_rele(wkey, FTAG);
+	return (0);
+}
+
+/*
+ * Remove one slot entry from the key object. Syncing context only, so the
+ * caller turns a failure into a VERIFY0().
+ */
+static int
+dsl_crypto_key_slot_remove(objset_t *mos, uint64_t dckobj, uint64_t slot,
+    dsl_crypto_key_slot_field_t field, dmu_tx_t *tx)
+{
+	char name[DSL_CRYPTO_KEY_SLOT_NAME_MAX];
+	int ret;
+
+	if (dsl_crypto_key_slot_name(name, sizeof (name), slot, field) == NULL)
+		return (SET_ERROR(ENOTSUP));
+
+	ret = zap_remove(mos, dckobj, name, tx);
+
+	/* a corrupt slot may be missing entries; clearing it is enough */
+	if (ret == ENOENT)
+		return (0);
+
+	return (ret);
+}
+
+/*
+ * Check that slot n can be removed from ds. Every failure condition lives
+ * here; the sync pass may only do work that cannot fail.
+ */
+int
+dsl_crypto_key_slot_remove_check(dsl_dataset_t *ds,
+    dsl_crypto_key_slot_args_t *args)
+{
+	int ret;
+	dsl_dir_t *dd = ds->ds_dir;
+	spa_t *spa = dd->dd_pool->dp_spa;
+	objset_t *mos = dd->dd_pool->dp_meta_objset;
+	uint64_t rddobj;
+	boolean_t exists;
+
+	/* a snapshot shares its filesystem's key object; it is not a target */
+	if (dsl_dataset_is_snapshot(ds))
+		return (SET_ERROR(EINVAL));
+
+	/* the target must be the encryption root, as for load-key */
+	ret = dsl_dir_get_encryption_root_ddobj(dd, &rddobj);
+	if (ret != 0 || rddobj != dd->dd_object)
+		return (SET_ERROR(EINVAL));
+
+	/* slots require the feature on the pool */
+	if (!spa_feature_is_enabled(spa, SPA_FEATURE_KEYSLOTS))
+		return (SET_ERROR(ENOTSUP));
+
+	/* slot 1 is the compatibility floor (D4); slot 0 is not a slot */
+	if (args->dcks_slot < 2)
+		return (SET_ERROR(EINVAL));
+
+	/* removal requires the key loaded (D15) */
+	ret = dsl_crypto_key_slot_check_wkey_loaded(dd);
+	if (ret != 0)
+		return (ret);
+
+	/* the slot must exist */
+	ret = dsl_crypto_key_slot_exists(mos, dd->dd_crypto_obj,
+	    args->dcks_slot, &exists);
+	if (ret != 0)
+		return (ret);
+	if (!exists)
+		return (SET_ERROR(ENOENT));
+
+	args->dcks_dckobj = dd->dd_crypto_obj;
+	return (0);
+}
+
+/*
+ * Delete the slot's six entries from the root's key object in one transaction.
+ * The feature stays active: there is no spa_feature_decr in v1.
+ */
+void
+dsl_crypto_key_slot_remove_sync(dsl_dataset_t *ds,
+    dsl_crypto_key_slot_args_t *args, dmu_tx_t *tx)
+{
+	objset_t *mos = ds->ds_dir->dd_pool->dp_meta_objset;
+	uint64_t dckobj = args->dcks_dckobj;
+	uint64_t slot = args->dcks_slot;
+
+	ASSERT(dmu_tx_is_syncing(tx));
+	ASSERT3U(slot, >=, 2);
+	ASSERT3U(args->dcks_dckobj, !=, 0);
+
+	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_WRAP, tx));
+	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_IV, tx));
+	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_MAC, tx));
+	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_KEYFORMAT, tx));
+	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_PBKDF2SALT, tx));
+	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_PBKDF2ITERS, tx));
+}
+
 static int
 dsl_crypto_key_open(objset_t *mos, dsl_wrapping_key_t *wkey,
     uint64_t dckobj, const void *tag, dsl_crypto_key_t **dck_out)
