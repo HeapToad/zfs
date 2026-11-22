@@ -520,6 +520,7 @@ _SYS_FS_ZFS_H zfs_prop_t zfs_name_to_prop(const char *);
 _SYS_FS_ZFS_H boolean_t zfs_prop_user(const char *);
 _SYS_FS_ZFS_H boolean_t zfs_prop_userquota(const char *);
 _SYS_FS_ZFS_H boolean_t zfs_prop_written(const char *);
+boolean_t zfs_prop_keyslot_location(const char *, uint64_t *);
 _SYS_FS_ZFS_H int zfs_prop_index_to_string(zfs_prop_t, uint64_t, const char **);
 _SYS_FS_ZFS_H int zfs_prop_string_to_index(zfs_prop_t, const char *,
     uint64_t *);

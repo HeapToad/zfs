@@ -891,6 +891,44 @@ zfs_prop_written(const char *name)
 }
 
 /*
+ * Returns true if name is a per-slot key location property, keylocation_<n>
+ * for n >= 2, and stores n in *slot_out. Slot 1 uses the unsuffixed
+ * keylocation property, so keylocation_1 is not part of the family.
+ */
+boolean_t
+zfs_prop_keyslot_location(const char *name, uint64_t *slot_out)
+{
+	static const char *prefix = "keylocation_";
+	size_t prefix_len = strlen(prefix);
+	const char *p = name + prefix_len;
+	uint64_t slot = 0;
+
+	if (strncmp(name, prefix, prefix_len) != 0 || *p == '\0')
+		return (B_FALSE);
+
+	/* the canonical form has no leading zero; "0" is rejected below */
+	if (*p == '0')
+		return (B_FALSE);
+
+	for (; *p != '\0'; p++) {
+		if (*p < '0' || *p > '9')
+			return (B_FALSE);
+		if (slot > (UINT64_MAX - (*p - '0')) / 10)
+			return (B_FALSE);
+		slot = slot * 10 + (*p - '0');
+	}
+
+	/* keylocation_1 would shadow the registered keylocation property */
+	if (slot < 2)
+		return (B_FALSE);
+
+	if (slot_out != NULL)
+		*slot_out = slot;
+
+	return (B_TRUE);
+}
+
+/*
  * Tables of index types, plus functions to convert between the user view
  * (strings) and internal representation (uint64_t).
  */
@@ -1152,6 +1190,7 @@ EXPORT_SYMBOL(zfs_prop_readonly);
 EXPORT_SYMBOL(zfs_prop_inheritable);
 EXPORT_SYMBOL(zfs_prop_encryption_key_param);
 EXPORT_SYMBOL(zfs_prop_valid_keylocation);
+EXPORT_SYMBOL(zfs_prop_keyslot_location);
 EXPORT_SYMBOL(zfs_prop_setonce);
 EXPORT_SYMBOL(zfs_prop_to_name);
 EXPORT_SYMBOL(zfs_name_to_prop);
