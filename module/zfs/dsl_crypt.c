@@ -878,6 +878,86 @@ dsl_crypto_key_slot_add_sync(dsl_dataset_t *ds,
 	}
 }
 
+/*
+ * Read a whole slot entry, rejecting a stored value whose byte length is not
+ * exactly len. zap_length() reports the stored encoding, so a truncated entry
+ * is rejected here, before the AEAD check; the object-level read path leaves
+ * that case to the MAC (design P1 §13).
+ */
+static int
+dsl_crypto_key_slot_read_checked(objset_t *mos, uint64_t dckobj, uint64_t slot,
+    dsl_crypto_key_slot_field_t field, uint64_t len, void *buf)
+{
+	char name[DSL_CRYPTO_KEY_SLOT_NAME_MAX];
+	uint64_t integer_size, num_integers;
+	int ret;
+
+	VERIFY(dsl_crypto_key_slot_name(name, sizeof (name), slot, field) !=
+	    NULL);
+
+	ret = zap_length(mos, dckobj, name, &integer_size, &num_integers);
+	if (ret != 0)
+		return (ret);
+
+	if (integer_size * num_integers != len)
+		return (SET_ERROR(EINVAL));
+
+	return (zap_lookup(mos, dckobj, name, integer_size, num_integers, buf));
+}
+
+/*
+ * Read slot n's sealed entries and unwrap the root's wrapping key with the
+ * slot's key. Returns ENOENT when the slot does not exist, EINVAL for a
+ * partial or wrongly sized slot, and ECKSUM when the slot key is wrong; the
+ * helper zeroes wkey1_out on failure.
+ */
+int
+dsl_crypto_key_slot_unwrap(objset_t *mos, uint64_t dckobj, uint64_t slot,
+    const crypto_key_t *wkey_n, uint8_t *wkey1_out)
+{
+	int ret;
+	uint64_t guid, crypt;
+	uint8_t cipher[WRAPPING_KEY_LEN];
+	uint8_t iv[WRAPPING_IV_LEN];
+	uint8_t mac[WRAPPING_MAC_LEN];
+
+	if (slot < 2 || wkey_n == NULL || wkey1_out == NULL)
+		return (SET_ERROR(EINVAL));
+
+	/* a slot exists iff WRAP_<n> does; ENOENT means no such slot */
+	ret = dsl_crypto_key_slot_read_checked(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_WRAP, WRAPPING_KEY_LEN, cipher);
+	if (ret != 0)
+		return (ret);
+
+	/* with WRAP present, a missing or short IV or MAC is corruption */
+	ret = dsl_crypto_key_slot_read_checked(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_IV, WRAPPING_IV_LEN, iv);
+	if (ret == ENOENT)
+		return (SET_ERROR(EINVAL));
+	if (ret != 0)
+		return (ret);
+
+	ret = dsl_crypto_key_slot_read_checked(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_MAC, WRAPPING_MAC_LEN, mac);
+	if (ret == ENOENT)
+		return (SET_ERROR(EINVAL));
+	if (ret != 0)
+		return (ret);
+
+	ret = zap_lookup(mos, dckobj, DSL_CRYPTO_KEY_GUID, 8, 1, &guid);
+	if (ret != 0)
+		return (ret);
+
+	ret = zap_lookup(mos, dckobj, DSL_CRYPTO_KEY_CRYPTO_SUITE, 8, 1,
+	    &crypt);
+	if (ret != 0)
+		return (ret);
+
+	return (zio_crypt_slot_unwrap(crypt, (crypto_key_t *)wkey_n, guid,
+	    ZIO_CRYPT_KEY_CURRENT_VERSION, slot, cipher, iv, mac, wkey1_out));
+}
+
 static int
 dsl_crypto_key_open(objset_t *mos, dsl_wrapping_key_t *wkey,
     uint64_t dckobj, const void *tag, dsl_crypto_key_t **dck_out)
