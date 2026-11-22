@@ -660,6 +660,224 @@ dsl_crypto_key_slot_write(objset_t *mos, uint64_t dckobj, uint64_t slot,
 	    tx));
 }
 
+/*
+ * Validate a slot's key derivation parameters with the same rules
+ * dmu_objset_create_crypt_check() applies when a dataset is created.
+ */
+boolean_t
+dsl_crypto_key_slot_params_valid(zfs_keyformat_t keyformat, uint64_t salt,
+    uint64_t iters)
+{
+	if (keyformat >= ZFS_KEYFORMAT_FORMATS ||
+	    keyformat == ZFS_KEYFORMAT_NONE)
+		return (B_FALSE);
+
+	if (keyformat == ZFS_KEYFORMAT_PASSPHRASE) {
+		if (salt == 0 || iters < MIN_PBKDF2_ITERATIONS)
+			return (B_FALSE);
+	} else if (salt != 0 || iters != 0) {
+		return (B_FALSE);
+	}
+
+	return (B_TRUE);
+}
+
+/*
+ * Copy the encryption root's in-memory wrapping key into wkey1. Returns
+ * EACCES when the key is not loaded.
+ */
+static int
+dsl_crypto_key_slot_hold_wkey1(dsl_dir_t *dd, uint8_t *wkey1)
+{
+	int ret;
+	dsl_wrapping_key_t *wkey = NULL;
+
+	ret = spa_keystore_wkey_hold_dd(dd->dd_pool->dp_spa, dd, FTAG, &wkey);
+	if (ret != 0)
+		return (SET_ERROR(EACCES));
+
+	ASSERT3U(wkey->wk_key.ck_length, ==,
+	    CRYPTO_BYTES2BITS(WRAPPING_KEY_LEN));
+	memcpy(wkey1, wkey->wk_key.ck_data, WRAPPING_KEY_LEN);
+
+	dsl_wrapping_key_rele(wkey, FTAG);
+	return (0);
+}
+
+/*
+ * Does the key object already hold a slot with this number? A slot exists iff
+ * its DSL_CRYPTO_WRAP_<n> entry does.
+ */
+static int
+dsl_crypto_key_slot_exists(objset_t *mos, uint64_t dckobj, uint64_t slot,
+    boolean_t *exists)
+{
+	char name[DSL_CRYPTO_KEY_SLOT_NAME_MAX];
+	uint64_t integer_size, num_integers;
+	int ret;
+
+	VERIFY(dsl_crypto_key_slot_name(name, sizeof (name), slot,
+	    DSL_CRYPTO_KEY_SLOT_WRAP) != NULL);
+
+	ret = zap_length(mos, dckobj, name, &integer_size, &num_integers);
+	if (ret == 0) {
+		*exists = B_TRUE;
+		return (0);
+	}
+	if (ret == ENOENT) {
+		*exists = B_FALSE;
+		return (0);
+	}
+
+	return (ret);
+}
+
+/*
+ * Pick the lowest free slot number. Slot numbers are reused, so the first free
+ * number is reached after at most the number of slots currently in use.
+ */
+static int
+dsl_crypto_key_slot_alloc(objset_t *mos, uint64_t dckobj, uint64_t *slot_out)
+{
+	boolean_t exists;
+	uint64_t slot;
+	int ret;
+
+	for (slot = 2; ; slot++) {
+		ret = dsl_crypto_key_slot_exists(mos, dckobj, slot, &exists);
+		if (ret != 0)
+			return (ret);
+		if (!exists) {
+			*slot_out = slot;
+			return (0);
+		}
+	}
+}
+
+/*
+ * Check that a slot can be added to ds. Every failure condition lives here;
+ * the sync pass may only do work that cannot fail.
+ */
+int
+dsl_crypto_key_slot_add_check(dsl_dataset_t *ds,
+    dsl_crypto_key_slot_args_t *args)
+{
+	int ret;
+	dsl_dir_t *dd = ds->ds_dir;
+	spa_t *spa = dd->dd_pool->dp_spa;
+	objset_t *mos = dd->dd_pool->dp_meta_objset;
+	uint64_t rddobj;
+
+	/* a snapshot shares its filesystem's key object; it is not a target */
+	if (dsl_dataset_is_snapshot(ds))
+		return (SET_ERROR(EINVAL));
+
+	/* the target must be the encryption root, as for load-key */
+	ret = dsl_dir_get_encryption_root_ddobj(dd, &rddobj);
+	if (ret != 0 || rddobj != dd->dd_object)
+		return (SET_ERROR(EINVAL));
+
+	/* slots require the feature on the pool */
+	if (!spa_feature_is_enabled(spa, SPA_FEATURE_KEYSLOTS))
+		return (SET_ERROR(ENOTSUP));
+
+	/* a pre-0.8 key object has no slot entries and cannot gain any */
+	if (dsl_dir_incompatible_encryption_version(dd))
+		return (SET_ERROR(ENOTSUP));
+
+	/*
+	 * Wrapping the root's wrapping key requires it in memory. This also
+	 * captures it for the sync pass.
+	 */
+	ret = dsl_crypto_key_slot_hold_wkey1(dd, args->dcks_wkey_1);
+	if (ret != 0)
+		return (ret);
+
+	/* parameters must match what zfs create accepts */
+	if (!dsl_crypto_key_slot_params_valid(args->dcks_keyformat,
+	    args->dcks_salt, args->dcks_iters))
+		return (SET_ERROR(EINVAL));
+
+	/* an optional location must be usable */
+	if (args->dcks_keylocation != NULL &&
+	    !zfs_prop_valid_keylocation(args->dcks_keylocation, B_TRUE))
+		return (SET_ERROR(EINVAL));
+
+	/* resolve or allocate the slot number */
+	if (args->dcks_slot != 0) {
+		boolean_t exists;
+
+		if (args->dcks_slot < 2)
+			return (SET_ERROR(EINVAL));
+		ret = dsl_crypto_key_slot_exists(mos, dd->dd_crypto_obj,
+		    args->dcks_slot, &exists);
+		if (ret != 0)
+			return (ret);
+		if (exists)
+			return (SET_ERROR(EEXIST));
+	} else {
+		ret = dsl_crypto_key_slot_alloc(mos, dd->dd_crypto_obj,
+		    &args->dcks_slot);
+		if (ret != 0)
+			return (ret);
+	}
+
+	args->dcks_dckobj = dd->dd_crypto_obj;
+	return (0);
+}
+
+/*
+ * Write the slot's six entries into the root's key object. Runs in syncing
+ * context, so every write is VERIFY0().
+ */
+void
+dsl_crypto_key_slot_add_sync(dsl_dataset_t *ds,
+    dsl_crypto_key_slot_args_t *args, dmu_tx_t *tx)
+{
+	objset_t *mos = ds->ds_dir->dd_pool->dp_meta_objset;
+	uint64_t dckobj = args->dcks_dckobj;
+	uint64_t guid, crypt;
+	crypto_key_t slot_key;
+	uint8_t iv[WRAPPING_IV_LEN];
+	uint8_t mac[WRAPPING_MAC_LEN];
+	uint8_t cipher[WRAPPING_KEY_LEN];
+
+	ASSERT(dmu_tx_is_syncing(tx));
+	ASSERT3U(args->dcks_slot, >=, 2);
+	ASSERT3U(args->dcks_dckobj, !=, 0);
+
+	VERIFY0(zap_lookup(mos, dckobj, DSL_CRYPTO_KEY_GUID, 8, 1, &guid));
+	VERIFY0(zap_lookup(mos, dckobj, DSL_CRYPTO_KEY_CRYPTO_SUITE, 8, 1,
+	    &crypt));
+
+	slot_key.ck_length = CRYPTO_BYTES2BITS(WRAPPING_KEY_LEN);
+	slot_key.ck_data = args->dcks_wkey_n;
+
+	VERIFY0(zio_crypt_slot_wrap(crypt, &slot_key, guid,
+	    ZIO_CRYPT_KEY_CURRENT_VERSION, args->dcks_slot,
+	    args->dcks_wkey_1, iv, mac, cipher));
+
+	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, args->dcks_slot,
+	    DSL_CRYPTO_KEY_SLOT_WRAP, 1, WRAPPING_KEY_LEN, cipher, tx));
+	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, args->dcks_slot,
+	    DSL_CRYPTO_KEY_SLOT_IV, 1, WRAPPING_IV_LEN, iv, tx));
+	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, args->dcks_slot,
+	    DSL_CRYPTO_KEY_SLOT_MAC, 1, WRAPPING_MAC_LEN, mac, tx));
+	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, args->dcks_slot,
+	    DSL_CRYPTO_KEY_SLOT_KEYFORMAT, 8, 1, &args->dcks_keyformat, tx));
+	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, args->dcks_slot,
+	    DSL_CRYPTO_KEY_SLOT_PBKDF2SALT, 8, 1, &args->dcks_salt, tx));
+	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, args->dcks_slot,
+	    DSL_CRYPTO_KEY_SLOT_PBKDF2ITERS, 8, 1, &args->dcks_iters, tx));
+
+	/* the first slot write activates the feature on this dataset */
+	if (!dsl_dataset_feature_is_active(ds, SPA_FEATURE_KEYSLOTS)) {
+		dsl_dataset_activate_feature(ds->ds_object,
+		    SPA_FEATURE_KEYSLOTS, (void *)B_TRUE, tx);
+		ds->ds_feature[SPA_FEATURE_KEYSLOTS] = (void *)B_TRUE;
+	}
+}
+
 static int
 dsl_crypto_key_open(objset_t *mos, dsl_wrapping_key_t *wkey,
     uint64_t dckobj, const void *tag, dsl_crypto_key_t **dck_out)

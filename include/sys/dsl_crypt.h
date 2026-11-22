@@ -69,6 +69,26 @@ typedef enum dsl_crypto_key_slot_field {
 } dsl_crypto_key_slot_field_t;
 
 /*
+ * Arguments for adding a key slot to an encryption root's key object. The
+ * caller fills in the slot's key material and parameters; the check pass fills
+ * in the root's key object, the chosen slot number and the root's wrapping key
+ * for the sync pass to use.
+ */
+typedef struct dsl_crypto_key_slot_args {
+	/* caller input */
+	uint64_t dcks_slot;			/* 0 = lowest free slot */
+	zfs_keyformat_t dcks_keyformat;
+	uint64_t dcks_salt;
+	uint64_t dcks_iters;
+	const char *dcks_keylocation;		/* optional */
+	uint8_t dcks_wkey_n[WRAPPING_KEY_LEN];
+
+	/* filled in by the check pass */
+	uint64_t dcks_dckobj;			/* root's key object */
+	uint8_t dcks_wkey_1[WRAPPING_KEY_LEN];	/* root's wrapping key */
+} dsl_crypto_key_slot_args_t;
+
+/*
  * In-memory representation of a wrapping key. One of these structs will exist
  * for each encryption root with its key loaded.
  */
@@ -199,6 +219,12 @@ int dsl_crypto_can_set_keylocation(const char *dsname, const char *keylocation);
 boolean_t dsl_dir_incompatible_encryption_version(dsl_dir_t *dd);
 const char *dsl_crypto_key_slot_name(char *buf, size_t buflen, uint64_t slot,
     dsl_crypto_key_slot_field_t field);
+boolean_t dsl_crypto_key_slot_params_valid(zfs_keyformat_t keyformat,
+    uint64_t salt, uint64_t iters);
+int dsl_crypto_key_slot_add_check(struct dsl_dataset *ds,
+    dsl_crypto_key_slot_args_t *args);
+void dsl_crypto_key_slot_add_sync(struct dsl_dataset *ds,
+    dsl_crypto_key_slot_args_t *args, dmu_tx_t *tx);
 
 void spa_keystore_init(spa_keystore_t *sk);
 void spa_keystore_fini(spa_keystore_t *sk);
