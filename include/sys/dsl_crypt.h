@@ -39,6 +39,36 @@
 #define	DSL_CRYPTO_KEY_VERSION		"DSL_CRYPTO_VERSION"
 
 /*
+ * Key slot numbers. Slot 1 is the primary slot and uses the legacy on-disk
+ * names above. Slots 2 and up are added by feature@keyslots.
+ */
+#define	DSL_CRYPTO_KEY_SLOT_PRIMARY	1
+
+/*
+ * A key-slot ZAP entry name is "DSL_CRYPTO_<FIELD>_<n>"; the longest is
+ * "DSL_CRYPTO_PBKDF2ITERS_" plus a 64-bit number and the NUL.
+ */
+#define	DSL_CRYPTO_KEY_SLOT_NAME_MAX	64
+
+/*
+ * Fields of a key slot whose ZAP entry name depends on the slot number, as
+ * resolved by dsl_crypto_key_slot_name(). The master and HMAC entries are
+ * specific to slot 1; slots 2 and up seal the root's wrapping key in a WRAP
+ * entry instead.
+ */
+typedef enum dsl_crypto_key_slot_field {
+	DSL_CRYPTO_KEY_SLOT_MASTER,	/* wrapped master key (slot 1 only) */
+	DSL_CRYPTO_KEY_SLOT_HMAC,	/* wrapped HMAC key (slot 1 only) */
+	DSL_CRYPTO_KEY_SLOT_WRAP,	/* sealed root wkey (slots >= 2 only) */
+	DSL_CRYPTO_KEY_SLOT_IV,
+	DSL_CRYPTO_KEY_SLOT_MAC,
+	DSL_CRYPTO_KEY_SLOT_KEYFORMAT,
+	DSL_CRYPTO_KEY_SLOT_PBKDF2SALT,
+	DSL_CRYPTO_KEY_SLOT_PBKDF2ITERS,
+	DSL_CRYPTO_KEY_SLOT_FIELDS	/* number of fields */
+} dsl_crypto_key_slot_field_t;
+
+/*
  * In-memory representation of a wrapping key. One of these structs will exist
  * for each encryption root with its key loaded.
  */
@@ -167,6 +197,8 @@ void dsl_crypto_params_free(dsl_crypto_params_t *dcp, boolean_t unload);
 void dsl_dataset_crypt_stats(struct dsl_dataset *ds, nvlist_t *nv);
 int dsl_crypto_can_set_keylocation(const char *dsname, const char *keylocation);
 boolean_t dsl_dir_incompatible_encryption_version(dsl_dir_t *dd);
+const char *dsl_crypto_key_slot_name(char *buf, size_t buflen, uint64_t slot,
+    dsl_crypto_key_slot_field_t field);
 
 void spa_keystore_init(spa_keystore_t *sk);
 void spa_keystore_fini(spa_keystore_t *sk);

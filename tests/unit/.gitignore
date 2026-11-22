@@ -13,4 +13,5 @@
 /test_zfs_file
 /test_indirect_mapping
 /test_zio_crypt_slot
+/test_dsl_crypt_slot_name
 /test_nvpair_stress

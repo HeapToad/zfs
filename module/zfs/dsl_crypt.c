@@ -537,12 +537,136 @@ dsl_crypto_key_rele(dsl_crypto_key_t *dck, const void *tag)
 		dsl_crypto_key_free(dck);
 }
 
+/*
+ * Write the on-disk ZAP name of a key-slot field into buf and return buf.
+ * Slot 1 uses the legacy names, including the property names for keyformat,
+ * salt and iterations. Slots 2 and up use DSL_CRYPTO_<FIELD>_<n> for the six
+ * fields a slot has; they have no master or HMAC entry, because a slot seals
+ * the root's wrapping key rather than the master/HMAC pair.
+ *
+ * Returns NULL for an unknown slot or field, or if buf is too small.
+ */
+const char *
+dsl_crypto_key_slot_name(char *buf, size_t buflen, uint64_t slot,
+    dsl_crypto_key_slot_field_t field)
+{
+	const char *legacy;
+	const char *prefix;
+	int len;
+
+	if (buf == NULL || buflen == 0)
+		return (NULL);
+
+	if (slot == DSL_CRYPTO_KEY_SLOT_PRIMARY) {
+		switch (field) {
+		case DSL_CRYPTO_KEY_SLOT_MASTER:
+			legacy = DSL_CRYPTO_KEY_MASTER_KEY;
+			break;
+		case DSL_CRYPTO_KEY_SLOT_HMAC:
+			legacy = DSL_CRYPTO_KEY_HMAC_KEY;
+			break;
+		case DSL_CRYPTO_KEY_SLOT_IV:
+			legacy = DSL_CRYPTO_KEY_IV;
+			break;
+		case DSL_CRYPTO_KEY_SLOT_MAC:
+			legacy = DSL_CRYPTO_KEY_MAC;
+			break;
+		case DSL_CRYPTO_KEY_SLOT_KEYFORMAT:
+			legacy = zfs_prop_to_name(ZFS_PROP_KEYFORMAT);
+			break;
+		case DSL_CRYPTO_KEY_SLOT_PBKDF2SALT:
+			legacy = zfs_prop_to_name(ZFS_PROP_PBKDF2_SALT);
+			break;
+		case DSL_CRYPTO_KEY_SLOT_PBKDF2ITERS:
+			legacy = zfs_prop_to_name(ZFS_PROP_PBKDF2_ITERS);
+			break;
+		default:
+			return (NULL);
+		}
+
+		if (strlcpy(buf, legacy, buflen) >= buflen)
+			return (NULL);
+
+		return (buf);
+	}
+
+	/* slot 0 is not a slot; slots 2 and up are the new form */
+	if (slot < 2)
+		return (NULL);
+
+	switch (field) {
+	case DSL_CRYPTO_KEY_SLOT_WRAP:
+		prefix = "DSL_CRYPTO_WRAP";
+		break;
+	case DSL_CRYPTO_KEY_SLOT_IV:
+		prefix = "DSL_CRYPTO_IV";
+		break;
+	case DSL_CRYPTO_KEY_SLOT_MAC:
+		prefix = "DSL_CRYPTO_MAC";
+		break;
+	case DSL_CRYPTO_KEY_SLOT_KEYFORMAT:
+		prefix = "DSL_CRYPTO_KEYFORMAT";
+		break;
+	case DSL_CRYPTO_KEY_SLOT_PBKDF2SALT:
+		prefix = "DSL_CRYPTO_PBKDF2SALT";
+		break;
+	case DSL_CRYPTO_KEY_SLOT_PBKDF2ITERS:
+		prefix = "DSL_CRYPTO_PBKDF2ITERS";
+		break;
+	default:
+		return (NULL);
+	}
+
+	len = snprintf(buf, buflen, "%s_%llu", prefix, (u_longlong_t)slot);
+	if (len < 0 || (size_t)len >= buflen)
+		return (NULL);
+
+	return (buf);
+}
+
+/*
+ * Read one field of a key slot from the key object. The slot number selects
+ * the entry name.
+ */
+static int
+dsl_crypto_key_slot_read(objset_t *mos, uint64_t dckobj, uint64_t slot,
+    dsl_crypto_key_slot_field_t field, uint64_t integer_size,
+    uint64_t num_integers, void *buf)
+{
+	char name[DSL_CRYPTO_KEY_SLOT_NAME_MAX];
+
+	if (dsl_crypto_key_slot_name(name, sizeof (name), slot, field) == NULL)
+		return (SET_ERROR(ENOTSUP));
+
+	return (zap_lookup(mos, dckobj, name, integer_size, num_integers,
+	    buf));
+}
+
+/*
+ * Write one field of a key slot to the key object. Syncing context only, so
+ * the caller turns a failure into a VERIFY0().
+ */
+static int
+dsl_crypto_key_slot_write(objset_t *mos, uint64_t dckobj, uint64_t slot,
+    dsl_crypto_key_slot_field_t field, uint64_t integer_size,
+    uint64_t num_integers, const void *buf, dmu_tx_t *tx)
+{
+	char name[DSL_CRYPTO_KEY_SLOT_NAME_MAX];
+
+	if (dsl_crypto_key_slot_name(name, sizeof (name), slot, field) == NULL)
+		return (SET_ERROR(ENOTSUP));
+
+	return (zap_update(mos, dckobj, name, integer_size, num_integers, buf,
+	    tx));
+}
+
 static int
 dsl_crypto_key_open(objset_t *mos, dsl_wrapping_key_t *wkey,
     uint64_t dckobj, const void *tag, dsl_crypto_key_t **dck_out)
 {
 	int ret;
 	uint64_t crypt = 0, guid = 0, version = 0;
+	const uint64_t slot = DSL_CRYPTO_KEY_SLOT_PRIMARY;
 	uint8_t raw_keydata[MASTER_KEY_MAX_LEN];
 	uint8_t raw_hmac_keydata[SHA512_HMAC_KEYLEN];
 	uint8_t iv[WRAPPING_IV_LEN];
@@ -568,23 +692,24 @@ dsl_crypto_key_open(objset_t *mos, dsl_wrapping_key_t *wkey,
 	if (ret != 0)
 		goto error;
 
-	ret = zap_lookup(mos, dckobj, DSL_CRYPTO_KEY_MASTER_KEY, 1,
-	    MASTER_KEY_MAX_LEN, raw_keydata);
+	ret = dsl_crypto_key_slot_read(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_MASTER, 1, MASTER_KEY_MAX_LEN, raw_keydata);
 	if (ret != 0)
 		goto error;
 
-	ret = zap_lookup(mos, dckobj, DSL_CRYPTO_KEY_HMAC_KEY, 1,
-	    SHA512_HMAC_KEYLEN, raw_hmac_keydata);
+	ret = dsl_crypto_key_slot_read(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_HMAC, 1, SHA512_HMAC_KEYLEN,
+	    raw_hmac_keydata);
 	if (ret != 0)
 		goto error;
 
-	ret = zap_lookup(mos, dckobj, DSL_CRYPTO_KEY_IV, 1, WRAPPING_IV_LEN,
-	    iv);
+	ret = dsl_crypto_key_slot_read(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_IV, 1, WRAPPING_IV_LEN, iv);
 	if (ret != 0)
 		goto error;
 
-	ret = zap_lookup(mos, dckobj, DSL_CRYPTO_KEY_MAC, 1, WRAPPING_MAC_LEN,
-	    mac);
+	ret = dsl_crypto_key_slot_read(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_MAC, 1, WRAPPING_MAC_LEN, mac);
 	if (ret != 0)
 		goto error;
 
@@ -1189,26 +1314,29 @@ dsl_crypto_key_sync_impl(objset_t *mos, uint64_t dckobj, uint64_t crypt,
     uint8_t *keydata, uint8_t *hmac_keydata, uint64_t keyformat,
     uint64_t salt, uint64_t iters, dmu_tx_t *tx)
 {
+	const uint64_t slot = DSL_CRYPTO_KEY_SLOT_PRIMARY;
+
 	VERIFY0(zap_update(mos, dckobj, DSL_CRYPTO_KEY_CRYPTO_SUITE, 8, 1,
 	    &crypt, tx));
 	VERIFY0(zap_update(mos, dckobj, DSL_CRYPTO_KEY_ROOT_DDOBJ, 8, 1,
 	    &root_ddobj, tx));
 	VERIFY0(zap_update(mos, dckobj, DSL_CRYPTO_KEY_GUID, 8, 1,
 	    &guid, tx));
-	VERIFY0(zap_update(mos, dckobj, DSL_CRYPTO_KEY_IV, 1, WRAPPING_IV_LEN,
-	    iv, tx));
-	VERIFY0(zap_update(mos, dckobj, DSL_CRYPTO_KEY_MAC, 1, WRAPPING_MAC_LEN,
-	    mac, tx));
-	VERIFY0(zap_update(mos, dckobj, DSL_CRYPTO_KEY_MASTER_KEY, 1,
-	    MASTER_KEY_MAX_LEN, keydata, tx));
-	VERIFY0(zap_update(mos, dckobj, DSL_CRYPTO_KEY_HMAC_KEY, 1,
-	    SHA512_HMAC_KEYLEN, hmac_keydata, tx));
-	VERIFY0(zap_update(mos, dckobj, zfs_prop_to_name(ZFS_PROP_KEYFORMAT),
-	    8, 1, &keyformat, tx));
-	VERIFY0(zap_update(mos, dckobj, zfs_prop_to_name(ZFS_PROP_PBKDF2_SALT),
-	    8, 1, &salt, tx));
-	VERIFY0(zap_update(mos, dckobj, zfs_prop_to_name(ZFS_PROP_PBKDF2_ITERS),
-	    8, 1, &iters, tx));
+	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_IV, 1, WRAPPING_IV_LEN, iv, tx));
+	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_MAC, 1, WRAPPING_MAC_LEN, mac, tx));
+	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_MASTER, 1, MASTER_KEY_MAX_LEN, keydata, tx));
+	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_HMAC, 1, SHA512_HMAC_KEYLEN, hmac_keydata,
+	    tx));
+	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_KEYFORMAT, 8, 1, &keyformat, tx));
+	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_PBKDF2SALT, 8, 1, &salt, tx));
+	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_PBKDF2ITERS, 8, 1, &iters, tx));
 }
 
 static void
