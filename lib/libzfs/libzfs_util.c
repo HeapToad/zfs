@@ -2022,7 +2022,8 @@ addlist(libzfs_handle_t *hdl, const char *propname, zprop_list_t **listp,
 	    !zpool_prop_feature(propname) &&
 	    !zpool_prop_unsupported(propname)) ||
 	    ((type == ZFS_TYPE_DATASET) && !zfs_prop_user(propname) &&
-	    !zfs_prop_userquota(propname) && !zfs_prop_written(propname)) ||
+	    !zfs_prop_userquota(propname) && !zfs_prop_written(propname) &&
+	    !zfs_prop_keyslot_location(propname, NULL)) ||
 	    ((type == ZFS_TYPE_VDEV) && !vdev_prop_user(propname)))) {
 		zfs_error_aux(hdl,
 		    "invalid property '%s'", propname);

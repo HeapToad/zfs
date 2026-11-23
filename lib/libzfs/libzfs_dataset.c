@@ -236,7 +236,8 @@ process_user_props(zfs_handle_t *zhp, nvlist_t *props)
 
 	elem = NULL;
 	while ((elem = nvlist_next_nvpair(props, elem)) != NULL) {
-		if (!zfs_prop_user(nvpair_name(elem)))
+		if (!zfs_prop_user(nvpair_name(elem)) &&
+		    !zfs_prop_keyslot_location(nvpair_name(elem), NULL))
 			continue;
 
 		nvlist_t *propval = fnvpair_value_nvlist(elem);
@@ -896,6 +897,29 @@ zfs_valid_proplist(libzfs_handle_t *hdl, zfs_type_t type, nvlist_t *nvl,
 			    "this property can not be modified for snapshots");
 			(void) zfs_error(hdl, EZFS_PROPTYPE, errbuf);
 			goto error;
+		}
+
+		/*
+		 * A per-slot key location is an unregistered string
+		 * property whose semantics belong to slot 1's keylocation,
+		 * so it is validated here the way a user property is. The
+		 * crypto checks (root-only, and no 'none' on an encrypted
+		 * dataset) run in the kernel, in zfs_prop_set_special().
+		 */
+		if (zfs_prop_keyslot_location(propname, NULL)) {
+			if (nvpair_type(elem) != DATA_TYPE_STRING) {
+				zfs_error_aux(hdl, "'%s' must be a string",
+				    propname);
+				(void) zfs_error(hdl, EZFS_BADPROP, errbuf);
+				goto error;
+			}
+
+			(void) nvpair_value_string(elem, &strval);
+			if (nvlist_add_string(ret, propname, strval) != 0) {
+				(void) no_memory(hdl);
+				goto error;
+			}
+			continue;
 		}
 
 		if (prop == ZPROP_USERPROP && zfs_prop_userquota(propname)) {
@@ -1851,6 +1875,15 @@ zfs_prop_inherit(zfs_handle_t *zhp, const char *propname, boolean_t received)
 	    "cannot inherit %s for '%s'", propname, zhp->zfs_name);
 
 	zc.zc_cookie = received;
+
+	/*
+	 * A per-slot key location is not inheritable, exactly like slot 1's
+	 * keylocation: both are local to the encryption root, and a child
+	 * inheriting one would name a source for key material it does not own.
+	 */
+	if (zfs_prop_keyslot_location(propname, NULL))
+		return (zfs_error(hdl, EZFS_PROPNONINHERIT, errbuf));
+
 	if ((prop = zfs_name_to_prop(propname)) == ZPROP_USERPROP) {
 		/*
 		 * For user properties, the amount of work we have to do is very

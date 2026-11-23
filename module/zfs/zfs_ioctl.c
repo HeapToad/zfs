@@ -2900,6 +2900,27 @@ zfs_prop_set_special(const char *dsname, zprop_source_t source,
 	const char *strval = NULL;
 	int err = -1;
 
+	/*
+	 * A per-slot key location names a source for key material, so it gets
+	 * slot 1's crypto checks (encryption root only, and no 'none' on an
+	 * encrypted dataset) before the value is written generically.
+	 */
+	if (zfs_prop_keyslot_location(propname, NULL)) {
+		if (nvpair_type(pair) == DATA_TYPE_NVLIST) {
+			nvlist_t *attrs;
+
+			VERIFY0(nvpair_value_nvlist(pair, &attrs));
+			VERIFY0(nvlist_lookup_nvpair(attrs, ZPROP_VALUE,
+			    &pair));
+		}
+
+		if (nvpair_value_string(pair, &strval) != 0)
+			return (SET_ERROR(EINVAL));
+
+		err = dsl_crypto_can_set_keylocation(dsname, strval);
+		return (err == 0 ? -1 : err);
+	}
+
 	if (prop == ZPROP_USERPROP) {
 		if (zfs_prop_userquota(propname))
 			return (zfs_prop_set_userquota(dsname, pair));
@@ -3168,6 +3189,9 @@ retry:
 			} else if (zfs_prop_userquota(propname)) {
 				if (nvpair_type(propval) !=
 				    DATA_TYPE_UINT64_ARRAY)
+					err = SET_ERROR(EINVAL);
+			} else if (zfs_prop_keyslot_location(propname, NULL)) {
+				if (nvpair_type(propval) != DATA_TYPE_STRING)
 					err = SET_ERROR(EINVAL);
 			} else {
 				err = SET_ERROR(EINVAL);
@@ -5293,6 +5317,16 @@ zfs_check_settable(const char *dsname, nvpair_t *pair, cred_t *cr)
 	zfs_prop_t prop = zfs_name_to_prop(propname);
 	uint64_t intval, compval;
 	int err;
+
+	/*
+	 * A per-slot location is an unregistered name, so it cannot reach the
+	 * zfs_prop_to_name() calls below (which assert). It is checked exactly
+	 * as slot 1's keylocation is: same delegation permission, same zoned
+	 * handling.
+	 */
+	if (zfs_prop_keyslot_location(propname, NULL))
+		return (zfs_secpolicy_setprop(dsname, ZFS_PROP_KEYLOCATION,
+		    pair, cr));
 
 	if (prop == ZPROP_USERPROP) {
 		if (zfs_prop_user(propname)) {
