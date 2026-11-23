@@ -45,6 +45,12 @@
 #define	DSL_CRYPTO_KEY_SLOT_PRIMARY	1
 
 /*
+ * Base name of the entry that seals an alternate slot's wrapping key. The
+ * full entry name is this prefix followed by "_<n>".
+ */
+#define	DSL_CRYPTO_KEY_SLOT_WRAP_PREFIX	"DSL_CRYPTO_WRAP"
+
+/*
  * A key-slot ZAP entry name is "DSL_CRYPTO_<FIELD>_<n>"; the longest is
  * "DSL_CRYPTO_PBKDF2ITERS_" plus a 64-bit number and the NUL.
  */
@@ -219,6 +225,7 @@ int dsl_crypto_can_set_keylocation(const char *dsname, const char *keylocation);
 boolean_t dsl_dir_incompatible_encryption_version(dsl_dir_t *dd);
 const char *dsl_crypto_key_slot_name(char *buf, size_t buflen, uint64_t slot,
     dsl_crypto_key_slot_field_t field);
+uint64_t dsl_crypto_key_slot_wrap_parse(const char *name);
 boolean_t dsl_crypto_key_slot_params_valid(zfs_keyformat_t keyformat,
     uint64_t salt, uint64_t iters);
 int dsl_crypto_key_slot_add_check(struct dsl_dataset *ds,

@@ -29,6 +29,7 @@ UNIT_TESTS = \
 	%D%/test_zio_crypt_slot \
 	%D%/test_dsl_crypt_slot_name \
 	%D%/test_dsl_crypt_slot_params \
+	%D%/test_dsl_crypt_slot_wrap_parse \
 	%D%/test_zfs_prop_keyslot_location
 
 # extra test binaries. not unit/correctness tests as such, but use the same
@@ -223,6 +224,18 @@ nodist_%C%_test_indirect_mapping_SOURCES = \
 	%D%/test_dsl_crypt_slot_params.c
 
 %C%_test_dsl_crypt_slot_params_LDADD = \
+	libzpool.la \
+	libzfs_core.la \
+	libspl.la \
+	libunit.la
+
+
+%C%_test_dsl_crypt_slot_wrap_parse_CFLAGS = $(AM_CFLAGS) $(LIBTIRPC_CFLAGS)
+
+%C%_test_dsl_crypt_slot_wrap_parse_SOURCES = \
+	%D%/test_dsl_crypt_slot_wrap_parse.c
+
+%C%_test_dsl_crypt_slot_wrap_parse_LDADD = \
 	libzpool.la \
 	libzfs_core.la \
 	libspl.la \

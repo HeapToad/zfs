@@ -16,4 +16,5 @@
 /test_dsl_crypt_slot_name
 /test_dsl_crypt_slot_params
 /test_zfs_prop_keyslot_location
+/test_dsl_crypt_slot_wrap_parse
 /test_nvpair_stress

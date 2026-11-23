@@ -596,7 +596,7 @@ dsl_crypto_key_slot_name(char *buf, size_t buflen, uint64_t slot,
 
 	switch (field) {
 	case DSL_CRYPTO_KEY_SLOT_WRAP:
-		prefix = "DSL_CRYPTO_WRAP";
+		prefix = DSL_CRYPTO_KEY_SLOT_WRAP_PREFIX;
 		break;
 	case DSL_CRYPTO_KEY_SLOT_IV:
 		prefix = "DSL_CRYPTO_IV";
@@ -622,6 +622,37 @@ dsl_crypto_key_slot_name(char *buf, size_t buflen, uint64_t slot,
 		return (NULL);
 
 	return (buf);
+}
+
+/*
+ * If name is a DSL_CRYPTO_WRAP_<n> entry, return the slot number; otherwise
+ * return 0. Slot 1 has no WRAP entry, so a non-zero result is always >= 2.
+ * The suffix must be a canonical decimal, matching dsl_crypto_key_slot_name().
+ */
+uint64_t
+dsl_crypto_key_slot_wrap_parse(const char *name)
+{
+	static const char *prefix = DSL_CRYPTO_KEY_SLOT_WRAP_PREFIX "_";
+	size_t prefix_len = strlen(prefix);
+	const char *p = name + prefix_len;
+	uint64_t slot = 0;
+
+	if (strncmp(name, prefix, prefix_len) != 0 || *p == '\0')
+		return (0);
+
+	/* the canonical form has no leading zero; "0" is rejected below */
+	if (*p == '0')
+		return (0);
+
+	for (; *p != '\0'; p++) {
+		if (*p < '0' || *p > '9')
+			return (0);
+		if (slot > (UINT64_MAX - (*p - '0')) / 10)
+			return (0);
+		slot = slot * 10 + (*p - '0');
+	}
+
+	return (slot >= 2 ? slot : 0);
 }
 
 /*
@@ -3132,6 +3163,102 @@ dsl_crypto_recv_raw(const char *poolname, uint64_t dsobj, uint64_t fromobj,
 	    dsl_crypto_recv_key_sync, &dcrka, 1, ZFS_SPACE_CHECK_NORMAL));
 }
 
+/*
+ * Pack every alternate slot on the encryption root's key object into a
+ * "keyslots" nvlist, keyed by the slot number. Slots are one set per tree, so
+ * this is called only for the encryption root's own record; a child's record
+ * carries no slot entries. Nothing is added when there are no slots.
+ */
+static int
+dsl_crypto_key_slot_populate_nvlist(objset_t *mos, uint64_t dckobj,
+    nvlist_t *nvl)
+{
+	int ret = 0;
+	zap_cursor_t *zc;
+	zap_attribute_t *za;
+	nvlist_t *slots = NULL;
+
+	zc = kmem_alloc(sizeof (*zc), KM_SLEEP);
+	za = zap_attribute_alloc();
+
+	for (zap_cursor_init(zc, mos, dckobj);
+	    zap_cursor_retrieve(zc, za) == 0;
+	    zap_cursor_advance(zc)) {
+		uint64_t slot = dsl_crypto_key_slot_wrap_parse(za->za_name);
+		uint64_t keyformat, salt, iters;
+		uint8_t cipher[WRAPPING_KEY_LEN];
+		uint8_t iv[WRAPPING_IV_LEN];
+		uint8_t mac[WRAPPING_MAC_LEN];
+		char key[32];
+		nvlist_t *slotnvl;
+
+		if (slot == 0)
+			continue;
+
+		ret = dsl_crypto_key_slot_read_checked(mos, dckobj, slot,
+		    DSL_CRYPTO_KEY_SLOT_WRAP, WRAPPING_KEY_LEN, cipher);
+		if (ret != 0)
+			goto out;
+		ret = dsl_crypto_key_slot_read_checked(mos, dckobj, slot,
+		    DSL_CRYPTO_KEY_SLOT_IV, WRAPPING_IV_LEN, iv);
+		if (ret != 0)
+			goto out;
+		ret = dsl_crypto_key_slot_read_checked(mos, dckobj, slot,
+		    DSL_CRYPTO_KEY_SLOT_MAC, WRAPPING_MAC_LEN, mac);
+		if (ret != 0)
+			goto out;
+		ret = dsl_crypto_key_slot_read_checked(mos, dckobj, slot,
+		    DSL_CRYPTO_KEY_SLOT_KEYFORMAT, sizeof (uint64_t),
+		    &keyformat);
+		if (ret != 0)
+			goto out;
+		ret = dsl_crypto_key_slot_read_checked(mos, dckobj, slot,
+		    DSL_CRYPTO_KEY_SLOT_PBKDF2SALT, sizeof (uint64_t), &salt);
+		if (ret != 0)
+			goto out;
+		ret = dsl_crypto_key_slot_read_checked(mos, dckobj, slot,
+		    DSL_CRYPTO_KEY_SLOT_PBKDF2ITERS, sizeof (uint64_t), &iters);
+		if (ret != 0)
+			goto out;
+
+		slotnvl = fnvlist_alloc();
+		VERIFY0(nvlist_add_uint8_array(slotnvl, "wrap", cipher,
+		    WRAPPING_KEY_LEN));
+		VERIFY0(nvlist_add_uint8_array(slotnvl, "iv", iv,
+		    WRAPPING_IV_LEN));
+		VERIFY0(nvlist_add_uint8_array(slotnvl, "mac", mac,
+		    WRAPPING_MAC_LEN));
+		fnvlist_add_uint64(slotnvl, "keyformat", keyformat);
+		fnvlist_add_uint64(slotnvl, "pbkdf2salt", salt);
+		fnvlist_add_uint64(slotnvl, "pbkdf2iters", iters);
+
+		if (slots == NULL)
+			slots = fnvlist_alloc();
+		(void) snprintf(key, sizeof (key), "%llu",
+		    (u_longlong_t)slot);
+		fnvlist_add_nvlist(slots, key, slotnvl);
+		fnvlist_free(slotnvl);
+	}
+
+	zap_cursor_fini(zc);
+	kmem_free(zc, sizeof (*zc));
+	zap_attribute_free(za);
+
+	if (slots != NULL) {
+		fnvlist_add_nvlist(nvl, "keyslots", slots);
+		fnvlist_free(slots);
+	}
+
+	return (0);
+
+out:
+	zap_cursor_fini(zc);
+	kmem_free(zc, sizeof (*zc));
+	zap_attribute_free(za);
+	nvlist_free(slots);
+	return (ret);
+}
+
 int
 dsl_crypto_populate_key_nvlist(objset_t *os, uint64_t from_ivset_guid,
     nvlist_t **nvl_out)
@@ -3240,6 +3367,17 @@ dsl_crypto_populate_key_nvlist(objset_t *os, uint64_t from_ivset_guid,
 
 		ret = zap_lookup(dp->dp_meta_objset, rdd->dd_crypto_obj,
 		    zfs_prop_to_name(ZFS_PROP_PBKDF2_SALT), 8, 1, &salt);
+		if (ret != 0)
+			goto error_unlock;
+	}
+
+	/*
+	 * Slots live on the encryption root's key object, so only the root's
+	 * own record carries them; a child's record must not.
+	 */
+	if (ds->ds_dir->dd_object == rddobj) {
+		ret = dsl_crypto_key_slot_populate_nvlist(mos,
+		    rdd->dd_crypto_obj, nvl);
 		if (ret != 0)
 			goto error_unlock;
 	}
