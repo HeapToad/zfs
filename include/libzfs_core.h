@@ -56,6 +56,8 @@ _LIBZFS_CORE_H int lzc_get_bookmarks(const char *, nvlist_t *, nvlist_t **);
 _LIBZFS_CORE_H int lzc_get_bookmark_props(const char *, nvlist_t **);
 _LIBZFS_CORE_H int lzc_destroy_bookmarks(nvlist_t *, nvlist_t **);
 _LIBZFS_CORE_H int lzc_load_key(const char *, boolean_t, uint8_t *, uint_t);
+_LIBZFS_CORE_H int lzc_load_key_slot(const char *, boolean_t, uint8_t *,
+    uint_t, uint64_t);
 _LIBZFS_CORE_H int lzc_unload_key(const char *);
 _LIBZFS_CORE_H int lzc_change_key(const char *, uint64_t, nvlist_t *, uint8_t *,
     uint_t);

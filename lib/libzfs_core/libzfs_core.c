@@ -1832,21 +1832,38 @@ lzc_set_vdev_prop(const char *poolname, nvlist_t *innvl, nvlist_t **outnvl)
  * crypto_cmd should be a value from dcp_cmd_t. If the command specifies to
  * load or change a wrapping key, the key should be specified in the
  * hidden_args nvlist so that it is not logged.
+ *
+ * The key slot the wrapping key was derived from travels in hidden_args as
+ * "keyslot" (uint64, optional, default 1). Slot 1 is the primary slot and
+ * the only one a kernel without feature@keyslots understands.
  */
 int
 lzc_load_key(const char *fsname, boolean_t noop, uint8_t *wkeydata,
     uint_t wkeylen)
 {
+	/* Slot 1 is the primary slot, which every kernel understands. */
+	return (lzc_load_key_slot(fsname, noop, wkeydata, wkeylen, 1));
+}
+
+/*
+ * Load the wrapping key from the named key slot. Slot 1 is the primary slot;
+ * slot 0 is not a slot.
+ */
+int
+lzc_load_key_slot(const char *fsname, boolean_t noop, uint8_t *wkeydata,
+    uint_t wkeylen, uint64_t slot)
+{
 	int error;
 	nvlist_t *ioc_args;
 	nvlist_t *hidden_args;
 
-	if (wkeydata == NULL)
+	if (wkeydata == NULL || slot == 0)
 		return (EINVAL);
 
 	ioc_args = fnvlist_alloc();
 	hidden_args = fnvlist_alloc();
 	fnvlist_add_uint8_array(hidden_args, "wkeydata", wkeydata, wkeylen);
+	fnvlist_add_uint64(hidden_args, "keyslot", slot);
 	fnvlist_add_nvlist(ioc_args, ZPOOL_HIDDEN_ARGS, hidden_args);
 	if (noop)
 		fnvlist_add_boolean(ioc_args, "noop");

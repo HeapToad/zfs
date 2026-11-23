@@ -7810,8 +7810,12 @@ zfs_ioc_pool_condense(const char *pool, nvlist_t *innvl, nvlist_t *onvl)
 /*
  * Load a user's wrapping key into the kernel.
  * innvl: {
- *     "hidden_args" -> { "wkeydata" -> value }
- *         raw uint8_t array of encryption wrapping key data (32 bytes)
+ *     "hidden_args" -> {
+ *         "wkeydata" -> value
+ *             raw uint8_t array of encryption wrapping key data (32 bytes)
+ *         "keyslot" -> uint64
+ *             key slot the wrapping key was derived from (optional, default 1)
+ *     }
  *     (optional) "noop" -> (value ignored)
  *         presence indicated key should only be verified, not loaded
  * }

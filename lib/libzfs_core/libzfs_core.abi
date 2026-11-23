@@ -98,6 +98,7 @@
     <elf-symbol name='lzc_initialize' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_ioctl_fd' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_load_key' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
+    <elf-symbol name='lzc_load_key_slot' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_pool_checkpoint' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_pool_checkpoint_discard' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_pool_prefetch' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
@@ -4031,6 +4032,14 @@
       <parameter type-id='c19b74c3' name='noop'/>
       <parameter type-id='ae3e8ca6' name='wkeydata'/>
       <parameter type-id='3502e3ff' name='wkeylen'/>
+      <return type-id='95e97e5e'/>
+    </function-decl>
+    <function-decl name='lzc_load_key_slot' mangled-name='lzc_load_key_slot' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='lzc_load_key_slot'>
+      <parameter type-id='80f4b756' name='fsname'/>
+      <parameter type-id='c19b74c3' name='noop'/>
+      <parameter type-id='ae3e8ca6' name='wkeydata'/>
+      <parameter type-id='3502e3ff' name='wkeylen'/>
+      <parameter type-id='9c313c2d' name='slot'/>
       <return type-id='95e97e5e'/>
     </function-decl>
     <function-decl name='lzc_unload_key' mangled-name='lzc_unload_key' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='lzc_unload_key'>
