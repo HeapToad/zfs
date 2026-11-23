@@ -3852,6 +3852,72 @@ dsl_crypto_key_destroy_sync(uint64_t dckobj, dmu_tx_t *tx)
 	}
 }
 
+/*
+ * Add the alternate slots' key derivation parameters to an encryption stats
+ * nvlist, keyed by slot number. Only public metadata is exposed: WRAP, IV and
+ * MAC stay on the key object, since a salt and iteration count next to the
+ * sealed wrapping key would let an attacker guess a passphrase offline
+ * (design P5 §10). A slot whose entries cannot be read is reported as absent;
+ * the load path still rejects it with EINVAL when it is used.
+ */
+static void
+dsl_dataset_crypt_stats_keyslots(dsl_dir_t *dd, nvlist_t *nv)
+{
+	objset_t *mos = dd->dd_pool->dp_meta_objset;
+	zap_cursor_t zc;
+	zap_attribute_t *za;
+	nvlist_t *slots = NULL;
+
+	if (!spa_feature_is_enabled(dd->dd_pool->dp_spa,
+	    SPA_FEATURE_KEYSLOTS))
+		return;
+
+	za = zap_attribute_alloc();
+
+	for (zap_cursor_init(&zc, mos, dd->dd_crypto_obj);
+	    zap_cursor_retrieve(&zc, za) == 0;
+	    zap_cursor_advance(&zc)) {
+		uint64_t slot = dsl_crypto_key_slot_wrap_parse(za->za_name);
+		uint64_t keyformat, salt, iters;
+		char key[32];
+		nvlist_t *slotnvl;
+
+		if (slot == 0)
+			continue;
+
+		if (dsl_crypto_key_slot_read_checked(mos, dd->dd_crypto_obj,
+		    slot, DSL_CRYPTO_KEY_SLOT_KEYFORMAT,
+		    sizeof (uint64_t), &keyformat) != 0 ||
+		    dsl_crypto_key_slot_read_checked(mos, dd->dd_crypto_obj,
+		    slot, DSL_CRYPTO_KEY_SLOT_PBKDF2SALT,
+		    sizeof (uint64_t), &salt) != 0 ||
+		    dsl_crypto_key_slot_read_checked(mos, dd->dd_crypto_obj,
+		    slot, DSL_CRYPTO_KEY_SLOT_PBKDF2ITERS,
+		    sizeof (uint64_t), &iters) != 0)
+			continue;
+
+		slotnvl = fnvlist_alloc();
+		fnvlist_add_uint64(slotnvl, "keyformat", keyformat);
+		fnvlist_add_uint64(slotnvl, "pbkdf2salt", salt);
+		fnvlist_add_uint64(slotnvl, "pbkdf2iters", iters);
+
+		if (slots == NULL)
+			slots = fnvlist_alloc();
+		(void) snprintf(key, sizeof (key), "%llu",
+		    (u_longlong_t)slot);
+		fnvlist_add_nvlist(slots, key, slotnvl);
+		fnvlist_free(slotnvl);
+	}
+
+	zap_cursor_fini(&zc);
+	zap_attribute_free(za);
+
+	if (slots != NULL) {
+		fnvlist_add_nvlist(nv, "keyslots", slots);
+		fnvlist_free(slots);
+	}
+}
+
 void
 dsl_dataset_crypt_stats(dsl_dataset_t *ds, nvlist_t *nv)
 {
@@ -3897,6 +3963,14 @@ dsl_dataset_crypt_stats(dsl_dataset_t *ds, nvlist_t *nv)
 			dsl_prop_nvlist_add_string(nv,
 			    ZFS_PROP_ENCRYPTION_ROOT, buf);
 		}
+
+		/*
+		 * The slot set lives on the encryption root's key object only,
+		 * and both consumers of this channel are root-only, so a child
+		 * reports no slots.
+		 */
+		if (intval == dd->dd_object)
+			dsl_dataset_crypt_stats_keyslots(dd, nv);
 	}
 }
 
