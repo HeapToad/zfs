@@ -146,6 +146,12 @@ dsl_crypto_params_create_nvlist(dcp_cmd_t cmd, nvlist_t *props,
 	dcp = kmem_zalloc(sizeof (dsl_crypto_params_t), KM_SLEEP);
 	dcp->cp_cmd = cmd;
 
+	/*
+	 * Only load-key names a slot; every other command uses the primary
+	 * slot. kmem_zalloc zeroes the struct, so set the default explicitly.
+	 */
+	dcp->cp_slot = DSL_CRYPTO_KEY_SLOT_PRIMARY;
+
 	/* get relevant arguments from the nvlists */
 	if (props != NULL) {
 		(void) nvlist_lookup_uint64(props,
@@ -163,8 +169,29 @@ dsl_crypto_params_create_nvlist(dcp_cmd_t cmd, nvlist_t *props,
 	}
 
 	if (crypto_args != NULL) {
+		nvpair_t *nvp = NULL;
+		uint64_t slot = DSL_CRYPTO_KEY_SLOT_PRIMARY;
+
 		(void) nvlist_lookup_uint8_array(crypto_args, "wkeydata",
 		    &wkeydata, &wkeydata_len);
+
+		/*
+		 * "keyslot" selects the slot the wrapping key is loaded from.
+		 * It is optional: absent means the primary slot, and a kernel
+		 * that does not know the key ignores it. Look the nvpair up by
+		 * name because nvlist_lookup_uint64() reports a wrongly typed
+		 * entry as ENOENT, which would silently fall back to slot 1.
+		 */
+		if (nvlist_lookup_nvpair(crypto_args, "keyslot", &nvp) == 0) {
+			if (nvpair_type(nvp) != DATA_TYPE_UINT64 ||
+			    nvpair_value_uint64(nvp, &slot) != 0 ||
+			    slot == 0) {
+				ret = SET_ERROR(EINVAL);
+				goto error;
+			}
+
+			dcp->cp_slot = slot;
+		}
 	}
 
 	/* check for valid command */
@@ -947,8 +974,10 @@ dsl_crypto_key_slot_read_checked(objset_t *mos, uint64_t dckobj, uint64_t slot,
 /*
  * Read slot n's sealed entries and unwrap the root's wrapping key with the
  * slot's key. Returns ENOENT when the slot does not exist, EINVAL for a
- * partial or wrongly sized slot, and ECKSUM when the slot key is wrong; the
- * helper zeroes wkey1_out on failure.
+ * partial or wrongly sized slot, and ECKSUM when the slot key is wrong.
+ * wkey1_out is written only on success. It is also zeroed when the AEAD
+ * check itself fails, but the earlier errors return without touching it, so
+ * callers must not read the buffer unless the call returned 0.
  */
 int
 dsl_crypto_key_slot_unwrap(objset_t *mos, uint64_t dckobj, uint64_t slot,
@@ -1364,7 +1393,8 @@ spa_keystore_load_wkey(const char *dsname, dsl_crypto_params_t *dcp,
 	if (dcp->cp_wkey == NULL ||
 	    dcp->cp_cmd != DCP_CMD_NONE ||
 	    dcp->cp_crypt != ZIO_CRYPT_INHERIT ||
-	    dcp->cp_keylocation != NULL)
+	    dcp->cp_keylocation != NULL ||
+	    dcp->cp_slot == 0)
 		return (SET_ERROR(EINVAL));
 
 	ret = dsl_pool_hold(dsname, FTAG, &dp);
@@ -1392,6 +1422,54 @@ spa_keystore_load_wkey(const char *dsname, dsl_crypto_params_t *dcp,
 
 	/* initialize the wkey's ddobj */
 	wkey->wk_ddobj = dd->dd_object;
+
+	/*
+	 * A slot above the primary one holds an alternate wrapping of wkey_1.
+	 * Unwrap it here and let the rest of the function run unchanged with
+	 * the recovered wkey_1, exactly as it does for slot 1.
+	 */
+	if (dcp->cp_slot >= 2) {
+		uint8_t wkey1[WRAPPING_KEY_LEN];
+		uint64_t crypt;
+
+		if (!spa_feature_is_enabled(dp->dp_spa,
+		    SPA_FEATURE_KEYSLOTS)) {
+			ret = SET_ERROR(ENOTSUP);
+			goto error;
+		}
+
+		/*
+		 * Report an unsupported suite as the primary path does, rather
+		 * than as the helper's generic EINVAL.
+		 */
+		ret = zap_lookup(dp->dp_meta_objset, dd->dd_crypto_obj,
+		    DSL_CRYPTO_KEY_CRYPTO_SUITE, 8, 1, &crypt);
+		if (ret != 0)
+			goto error;
+		if (crypt >= ZIO_CRYPT_FUNCTIONS) {
+			ret = SET_ERROR(ZFS_ERR_CRYPTO_NOTSUP);
+			goto error;
+		}
+
+		ret = dsl_crypto_key_slot_unwrap(dp->dp_meta_objset,
+		    dd->dd_crypto_obj, dcp->cp_slot, &wkey->wk_key, wkey1);
+		if (ret == ECKSUM) {
+			/* authentication failure, as for the primary slot */
+			ret = SET_ERROR(EACCES);
+			goto error;
+		}
+		if (ret == ENOTSUP) {
+			ret = SET_ERROR(ZFS_ERR_CRYPTO_NOTSUP);
+			goto error;
+		}
+		if (ret != 0) {
+			/* ENOENT: no such slot.  EINVAL: corrupt slot. */
+			goto error;
+		}
+
+		memcpy(wkey->wk_key.ck_data, wkey1, WRAPPING_KEY_LEN);
+		memset(wkey1, 0, sizeof (wkey1));
+	}
 
 	/* verify that the wkey is correct by opening its dsl key */
 	ret = dsl_crypto_key_open(dp->dp_meta_objset, wkey,

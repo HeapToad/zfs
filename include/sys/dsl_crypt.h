@@ -153,6 +153,9 @@ typedef struct dsl_crypto_params {
 
 	/* the wrapping key */
 	dsl_wrapping_key_t *cp_wkey;
+
+	/* slot the wrapping key is loaded from; 1 is the primary slot */
+	uint64_t cp_slot;
 } dsl_crypto_params_t;
 
 /*
