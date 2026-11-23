@@ -5729,21 +5729,36 @@ extract_delay_props(nvlist_t *props)
 	for (nvp = nvlist_next_nvpair(props, NULL); nvp != NULL;
 	    nvp = nvlist_next_nvpair(props, nvp)) {
 		/*
-		 * strcmp() is safe because zfs_prop_to_name() always returns
-		 * a bounded string.
+		 * A per-slot location waits for the same reason keylocation
+		 * does: the dataset may not be the encryption root until the
+		 * hierarchy fixup has run, and the family's crypto check
+		 * requires it. It is not in the table, so it is matched by
+		 * the predicate rather than zfs_prop_to_name().
 		 */
-		for (i = 0; delayable[i] != 0; i++) {
-			if (strcmp(zfs_prop_to_name(delayable[i]),
-			    nvpair_name(nvp)) == 0) {
-				break;
+		boolean_t delay = zfs_prop_keyslot_location(nvpair_name(nvp),
+		    NULL);
+
+		if (!delay) {
+			/*
+			 * strcmp() is safe because zfs_prop_to_name() always
+			 * returns a bounded string.
+			 */
+			for (i = 0; delayable[i] != 0; i++) {
+				if (strcmp(zfs_prop_to_name(delayable[i]),
+				    nvpair_name(nvp)) == 0) {
+					break;
+				}
 			}
+			delay = (delayable[i] != 0);
 		}
-		if (delayable[i] != 0) {
-			tmp = nvlist_prev_nvpair(props, nvp);
-			VERIFY0(nvlist_add_nvpair(delayprops, nvp));
-			VERIFY0(nvlist_remove_nvpair(props, nvp));
-			nvp = tmp;
-		}
+
+		if (!delay)
+			continue;
+
+		tmp = nvlist_prev_nvpair(props, nvp);
+		VERIFY0(nvlist_add_nvpair(delayprops, nvp));
+		VERIFY0(nvlist_remove_nvpair(props, nvp));
+		nvp = tmp;
 	}
 
 	if (nvlist_empty(delayprops)) {

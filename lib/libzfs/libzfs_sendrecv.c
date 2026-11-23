@@ -380,8 +380,10 @@ send_iterate_prop(zfs_handle_t *zhp, boolean_t received_only, nvlist_t *nv)
 	while ((elem = nvlist_next_nvpair(props, elem)) != NULL) {
 		const char *propname = nvpair_name(elem);
 		zfs_prop_t prop = zfs_name_to_prop(propname);
+		boolean_t keyslot_location =
+		    zfs_prop_keyslot_location(propname, NULL);
 
-		if (!zfs_prop_user(propname)) {
+		if (!zfs_prop_user(propname) && !keyslot_location) {
 			/*
 			 * Realistically, this should never happen.  However,
 			 * we want the ability to add DSL properties without
@@ -420,7 +422,7 @@ send_iterate_prop(zfs_handle_t *zhp, boolean_t received_only, nvlist_t *nv)
 				continue;
 		}
 
-		if (zfs_prop_user(propname) ||
+		if (zfs_prop_user(propname) || keyslot_location ||
 		    zfs_prop_get_type(prop) == PROP_TYPE_STRING) {
 			const char *value;
 			value = fnvlist_lookup_string(propnv, ZPROP_VALUE);
@@ -3385,6 +3387,48 @@ created_before(libzfs_handle_t *hdl, avl_tree_t *avl,
 }
 
 /*
+ * Restore the keylocation_<n> values a stream carried. A slot location is not
+ * inheritable and belongs to the encryption root, so this runs only where the
+ * dataset is an encryption root, like the keylocation fixup in the caller.
+ *
+ * The family is not in the property table, so it cannot be read with
+ * zfs_prop_get(); libzfs keeps unregistered string properties in the same
+ * bucket as user properties, which is where the current value is looked up.
+ */
+static int
+recv_restore_key_slot_locations(zfs_handle_t *zhp, nvlist_t *stream_props)
+{
+	nvlist_t *local_props = zfs_get_user_props(zhp);
+	nvpair_t *elem = NULL;
+
+	while ((elem = nvlist_next_nvpair(stream_props, elem)) != NULL) {
+		const char *name = nvpair_name(elem);
+		nvlist_t *propval;
+		const char *want, *have;
+		int err;
+
+		if (!zfs_prop_keyslot_location(name, NULL) ||
+		    nvpair_type(elem) != DATA_TYPE_STRING)
+			continue;
+
+		want = fnvpair_value_string(elem);
+
+		/* only write when the value differs, like keylocation */
+		if (local_props != NULL &&
+		    nvlist_lookup_nvlist(local_props, name, &propval) == 0 &&
+		    nvlist_lookup_string(propval, ZPROP_VALUE, &have) == 0 &&
+		    strcmp(have, want) == 0)
+			continue;
+
+		err = zfs_prop_set(zhp, name, want);
+		if (err != 0)
+			return (err);
+	}
+
+	return (0);
+}
+
+/*
  * This function reestablishes the hierarchy of encryption roots after a
  * recursive incremental receive has completed. This must be done after the
  * second call to recv_incremental_replication() has renamed and promoted all
@@ -3489,6 +3533,12 @@ recv_fix_encryption_hierarchy(libzfs_handle_t *hdl, const char *top_zfs,
 			}
 
 			/*
+			 * Refresh the properties in case the call to
+			 * lzc_change_key() changed the value.
+			 */
+			zfs_refresh_properties(zhp);
+
+			/*
 			 * Restore the keylocation only if the stream carried
 			 * it.  A holds-only raw send has no properties, and a
 			 * 'send -b' stream has only received ones, which
@@ -3501,11 +3551,6 @@ recv_fix_encryption_hierarchy(libzfs_handle_t *hdl, const char *top_zfs,
 			    zfs_prop_to_name(ZFS_PROP_KEYLOCATION),
 			    &stream_keylocation) == 0) {
 
-				/*
-				 * Refresh the properties in case the call to
-				 * lzc_change_key() changed the value.
-				 */
-				zfs_refresh_properties(zhp);
 				err = zfs_prop_get(zhp, ZFS_PROP_KEYLOCATION,
 				    keylocation, sizeof (keylocation), NULL,
 				    NULL, 0, B_TRUE);
@@ -3525,6 +3570,19 @@ recv_fix_encryption_hierarchy(libzfs_handle_t *hdl, const char *top_zfs,
 						goto error;
 					}
 				}
+			}
+
+			/*
+			 * The per-slot locations travel the same way, and are
+			 * put back for the same reason: a dataset that becomes
+			 * an encryption root here could not accept them
+			 * earlier.
+			 */
+			if (stream_props != NULL &&
+			    recv_restore_key_slot_locations(zhp,
+			    stream_props) != 0) {
+				zfs_close(zhp);
+				goto error;
 			}
 		}
 

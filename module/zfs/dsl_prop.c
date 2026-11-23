@@ -1142,9 +1142,15 @@ dsl_prop_get_all_impl(objset_t *mos, uint64_t propobj,
 
 		prop = zfs_name_to_prop(propname);
 
-		/* Skip non-inheritable properties. */
+		/*
+		 * Skip non-inheritable properties. A per-slot key location is
+		 * one: it is local to the encryption root exactly like
+		 * keylocation, even though it is not in the property table and
+		 * therefore looks like a user property here.
+		 */
 		if ((flags & DSL_PROP_GET_INHERITING) &&
-		    prop != ZPROP_USERPROP && !zfs_prop_inheritable(prop))
+		    (zfs_prop_keyslot_location(propname, NULL) ||
+		    (prop != ZPROP_USERPROP && !zfs_prop_inheritable(prop))))
 			continue;
 
 		/* Skip properties not valid for this type. */
