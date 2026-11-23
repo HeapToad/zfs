@@ -625,6 +625,28 @@ dsl_crypto_key_slot_name(char *buf, size_t buflen, uint64_t slot,
 }
 
 /*
+ * Parse a canonical decimal slot number (n >= 2) from s, or return 0.
+ */
+static uint64_t
+dsl_crypto_key_slot_num_parse(const char *s)
+{
+	uint64_t slot = 0;
+
+	if (*s == '\0' || *s == '0')
+		return (0);
+
+	for (; *s != '\0'; s++) {
+		if (*s < '0' || *s > '9')
+			return (0);
+		if (slot > (UINT64_MAX - (*s - '0')) / 10)
+			return (0);
+		slot = slot * 10 + (*s - '0');
+	}
+
+	return (slot >= 2 ? slot : 0);
+}
+
+/*
  * If name is a DSL_CRYPTO_WRAP_<n> entry, return the slot number; otherwise
  * return 0. Slot 1 has no WRAP entry, so a non-zero result is always >= 2.
  * The suffix must be a canonical decimal, matching dsl_crypto_key_slot_name().
@@ -634,25 +656,11 @@ dsl_crypto_key_slot_wrap_parse(const char *name)
 {
 	static const char *prefix = DSL_CRYPTO_KEY_SLOT_WRAP_PREFIX "_";
 	size_t prefix_len = strlen(prefix);
-	const char *p = name + prefix_len;
-	uint64_t slot = 0;
 
-	if (strncmp(name, prefix, prefix_len) != 0 || *p == '\0')
+	if (strncmp(name, prefix, prefix_len) != 0)
 		return (0);
 
-	/* the canonical form has no leading zero; "0" is rejected below */
-	if (*p == '0')
-		return (0);
-
-	for (; *p != '\0'; p++) {
-		if (*p < '0' || *p > '9')
-			return (0);
-		if (slot > (UINT64_MAX - (*p - '0')) / 10)
-			return (0);
-		slot = slot * 10 + (*p - '0');
-	}
-
-	return (slot >= 2 ? slot : 0);
+	return (dsl_crypto_key_slot_num_parse(name + prefix_len));
 }
 
 /*
@@ -1032,6 +1040,30 @@ dsl_crypto_key_slot_remove(objset_t *mos, uint64_t dckobj, uint64_t slot,
 }
 
 /*
+ * Delete a whole slot. Its six entries are written together, so they are
+ * removed together. Syncing context only.
+ */
+static void
+dsl_crypto_key_slot_delete(objset_t *mos, uint64_t dckobj, uint64_t slot,
+    dmu_tx_t *tx)
+{
+	ASSERT3U(slot, >=, 2);
+
+	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_WRAP, tx));
+	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_IV, tx));
+	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_MAC, tx));
+	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_KEYFORMAT, tx));
+	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_PBKDF2SALT, tx));
+	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
+	    DSL_CRYPTO_KEY_SLOT_PBKDF2ITERS, tx));
+}
+
+/*
  * Check that slot n can be removed from ds. Every failure condition lives
  * here; the sync pass may only do work that cannot fail.
  */
@@ -1096,18 +1128,7 @@ dsl_crypto_key_slot_remove_sync(dsl_dataset_t *ds,
 	ASSERT3U(slot, >=, 2);
 	ASSERT3U(args->dcks_dckobj, !=, 0);
 
-	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
-	    DSL_CRYPTO_KEY_SLOT_WRAP, tx));
-	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
-	    DSL_CRYPTO_KEY_SLOT_IV, tx));
-	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
-	    DSL_CRYPTO_KEY_SLOT_MAC, tx));
-	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
-	    DSL_CRYPTO_KEY_SLOT_KEYFORMAT, tx));
-	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
-	    DSL_CRYPTO_KEY_SLOT_PBKDF2SALT, tx));
-	VERIFY0(dsl_crypto_key_slot_remove(mos, dckobj, slot,
-	    DSL_CRYPTO_KEY_SLOT_PBKDF2ITERS, tx));
+	dsl_crypto_key_slot_delete(mos, dckobj, slot, tx);
 }
 
 static int
@@ -2870,6 +2891,206 @@ dsl_crypto_recv_raw_objset_sync(dsl_dataset_t *ds, dmu_objset_type_t ostype,
 	}
 }
 
+/*
+ * Validate the "keyslots" nvlist of a raw-received key record. Slot material
+ * is root-only, so a record for a dataset that is not the encryption root
+ * cannot carry it. Validation is structural: a wrong passphrase is not a
+ * corrupt stream and is left to load time.
+ */
+static int
+dsl_crypto_key_slot_recv_check(dsl_dataset_t *ds, nvlist_t *nvl,
+    dmu_tx_t *tx)
+{
+	int ret;
+	uint64_t rddobj;
+	nvlist_t *slots;
+	nvpair_t *elem = NULL;
+	boolean_t is_root;
+
+	ret = nvlist_lookup_nvlist(nvl, "keyslots", &slots);
+	if (ret == ENOENT)
+		return (0);
+	if (ret != 0)
+		return (SET_ERROR(EINVAL));
+
+	if (!spa_feature_is_enabled(tx->tx_pool->dp_spa,
+	    SPA_FEATURE_KEYSLOTS))
+		return (SET_ERROR(ENOTSUP));
+
+	/*
+	 * With an existing key object the slots may only be filed on the
+	 * encryption root's key object; a record carrying them for a child
+	 * would leave them where nothing reads them. Root-ness is decided by
+	 * the key object, not by the dsl dir: an incremental receive lands on
+	 * the hidden %recv clone, whose dsl dir is not the root but which
+	 * shares the root's key object. With no key object yet the dataset
+	 * becomes a root of its own, so there is nothing to check.
+	 */
+	if (ds->ds_dir->dd_crypto_obj != 0) {
+		dsl_dir_t *rdd;
+
+		ret = dsl_dir_get_encryption_root_ddobj(ds->ds_dir, &rddobj);
+		if (ret != 0)
+			return (ret);
+		ret = dsl_dir_hold_obj(tx->tx_pool, rddobj, NULL, FTAG, &rdd);
+		if (ret != 0)
+			return (ret);
+		is_root = (rdd->dd_crypto_obj == ds->ds_dir->dd_crypto_obj);
+		dsl_dir_rele(rdd, FTAG);
+		if (!is_root)
+			return (SET_ERROR(EINVAL));
+
+		/* a pre-0.8 key object cannot hold slots, as for keyslot add */
+		if (dsl_dir_incompatible_encryption_version(ds->ds_dir))
+			return (SET_ERROR(ENOTSUP));
+	}
+
+	while ((elem = nvlist_next_nvpair(slots, elem)) != NULL) {
+		nvlist_t *slotnvl;
+		uint64_t keyformat, salt, iters;
+		uint8_t *buf;
+		uint_t len;
+
+		if (dsl_crypto_key_slot_num_parse(nvpair_name(elem)) == 0)
+			return (SET_ERROR(EINVAL));
+
+		if (nvpair_type(elem) != DATA_TYPE_NVLIST)
+			return (SET_ERROR(EINVAL));
+		VERIFY0(nvpair_value_nvlist(elem, &slotnvl));
+
+		if (nvlist_lookup_uint8_array(slotnvl, "wrap", &buf, &len) !=
+		    0 || len != WRAPPING_KEY_LEN)
+			return (SET_ERROR(EINVAL));
+		if (nvlist_lookup_uint8_array(slotnvl, "iv", &buf, &len) != 0 ||
+		    len != WRAPPING_IV_LEN)
+			return (SET_ERROR(EINVAL));
+		if (nvlist_lookup_uint8_array(slotnvl, "mac", &buf, &len) !=
+		    0 || len != WRAPPING_MAC_LEN)
+			return (SET_ERROR(EINVAL));
+
+		if (nvlist_lookup_uint64(slotnvl, "keyformat",
+		    &keyformat) != 0 || keyformat >= ZFS_KEYFORMAT_FORMATS)
+			return (SET_ERROR(EINVAL));
+		if (nvlist_lookup_uint64(slotnvl, "pbkdf2salt", &salt) != 0 ||
+		    nvlist_lookup_uint64(slotnvl, "pbkdf2iters", &iters) != 0)
+			return (SET_ERROR(EINVAL));
+		if (!dsl_crypto_key_slot_params_valid(keyformat, salt, iters))
+			return (SET_ERROR(EINVAL));
+	}
+
+	return (0);
+}
+
+/*
+ * Rewrite the root's slot entries to match a raw-received key record. The
+ * stream's bytes are written verbatim: they seal the same root wrapping key
+ * under a key this pool has yet to be given, so no unwrap is attempted. A
+ * record that carries no slots is an empty set, so a destination that has
+ * slots loses them; that is the rule, not an oversight.
+ */
+static void
+dsl_crypto_key_slot_recv_sync(dsl_dataset_t *ds, nvlist_t *nvl, dmu_tx_t *tx)
+{
+	objset_t *mos = tx->tx_pool->dp_meta_objset;
+	uint64_t dckobj = ds->ds_dir->dd_crypto_obj;
+	nvlist_t *slots = NULL, *stale = NULL;
+	nvpair_t *elem;
+	zap_cursor_t *zc;
+	zap_attribute_t *za;
+
+	ASSERT(dmu_tx_is_syncing(tx));
+	ASSERT3U(dckobj, !=, 0);
+
+	(void) nvlist_lookup_nvlist(nvl, "keyslots", &slots);
+
+	/*
+	 * Collect the local slots the record does not carry. They cannot be
+	 * removed while the key object is being walked, so removal waits.
+	 */
+	zc = kmem_alloc(sizeof (*zc), KM_SLEEP);
+	za = zap_attribute_alloc();
+	for (zap_cursor_init(zc, mos, dckobj);
+	    zap_cursor_retrieve(zc, za) == 0;
+	    zap_cursor_advance(zc)) {
+		uint64_t slot = dsl_crypto_key_slot_wrap_parse(za->za_name);
+		char name[DSL_CRYPTO_KEY_SLOT_NAME_MAX];
+
+		if (slot == 0)
+			continue;
+
+		(void) snprintf(name, sizeof (name), "%llu",
+		    (u_longlong_t)slot);
+		if (slots != NULL && nvlist_exists(slots, name))
+			continue;
+
+		if (stale == NULL)
+			stale = fnvlist_alloc();
+		fnvlist_add_boolean(stale, name);
+	}
+	zap_cursor_fini(zc);
+	kmem_free(zc, sizeof (*zc));
+	zap_attribute_free(za);
+
+	/* drop the slots only this side has */
+	for (elem = nvlist_next_nvpair(stale, NULL); elem != NULL;
+	    elem = nvlist_next_nvpair(stale, elem)) {
+		dsl_crypto_key_slot_delete(mos, dckobj,
+		    dsl_crypto_key_slot_num_parse(nvpair_name(elem)), tx);
+	}
+	nvlist_free(stale);
+
+	if (slots == NULL || nvlist_empty(slots))
+		return;
+
+	/* write the record's slots over whatever is there */
+	for (elem = nvlist_next_nvpair(slots, NULL); elem != NULL;
+	    elem = nvlist_next_nvpair(slots, elem)) {
+		nvlist_t *slotnvl;
+		uint64_t slot, value;
+		uint8_t *buf;
+		uint_t len;
+
+		slot = dsl_crypto_key_slot_num_parse(nvpair_name(elem));
+		VERIFY3U(slot, >=, 2);
+		VERIFY0(nvpair_value_nvlist(elem, &slotnvl));
+
+		VERIFY0(nvlist_lookup_uint8_array(slotnvl, "wrap", &buf, &len));
+		VERIFY3U(len, ==, WRAPPING_KEY_LEN);
+		VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, slot,
+		    DSL_CRYPTO_KEY_SLOT_WRAP, 1, WRAPPING_KEY_LEN, buf, tx));
+
+		VERIFY0(nvlist_lookup_uint8_array(slotnvl, "iv", &buf, &len));
+		VERIFY3U(len, ==, WRAPPING_IV_LEN);
+		VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, slot,
+		    DSL_CRYPTO_KEY_SLOT_IV, 1, WRAPPING_IV_LEN, buf, tx));
+
+		VERIFY0(nvlist_lookup_uint8_array(slotnvl, "mac", &buf, &len));
+		VERIFY3U(len, ==, WRAPPING_MAC_LEN);
+		VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, slot,
+		    DSL_CRYPTO_KEY_SLOT_MAC, 1, WRAPPING_MAC_LEN, buf, tx));
+
+		value = fnvlist_lookup_uint64(slotnvl, "keyformat");
+		VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, slot,
+		    DSL_CRYPTO_KEY_SLOT_KEYFORMAT, sizeof (uint64_t), 1,
+		    &value, tx));
+		value = fnvlist_lookup_uint64(slotnvl, "pbkdf2salt");
+		VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, slot,
+		    DSL_CRYPTO_KEY_SLOT_PBKDF2SALT, sizeof (uint64_t), 1,
+		    &value, tx));
+		value = fnvlist_lookup_uint64(slotnvl, "pbkdf2iters");
+		VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, slot,
+		    DSL_CRYPTO_KEY_SLOT_PBKDF2ITERS, sizeof (uint64_t), 1,
+		    &value, tx));
+	}
+
+	/* the first slot write activates the feature on this dataset */
+	if (!dsl_dataset_feature_is_active(ds, SPA_FEATURE_KEYSLOTS)) {
+		dsl_dataset_activate_feature(ds->ds_object,
+		    SPA_FEATURE_KEYSLOTS, (void *)B_TRUE, tx);
+		ds->ds_feature[SPA_FEATURE_KEYSLOTS] = (void *)B_TRUE;
+	}
+}
+
 int
 dsl_crypto_recv_raw_key_check(dsl_dataset_t *ds, nvlist_t *nvl, dmu_tx_t *tx)
 {
@@ -2965,7 +3186,7 @@ dsl_crypto_recv_raw_key_check(dsl_dataset_t *ds, nvlist_t *nvl, dmu_tx_t *tx)
 	if (ret != 0 || (is_passphrase == (intval == 0)))
 		return (SET_ERROR(EINVAL));
 
-	return (0);
+	return (dsl_crypto_key_slot_recv_check(ds, nvl, tx));
 }
 
 void
@@ -3084,6 +3305,12 @@ dsl_crypto_recv_raw_key_sync(dsl_dataset_t *ds, nvlist_t *nvl, dmu_tx_t *tx)
 	dsl_crypto_key_sync_impl(mos, dd->dd_crypto_obj, crypt,
 	    rddobj, key_guid, iv, mac, keydata, hmac_keydata, keyformat, salt,
 	    iters, tx);
+
+	/*
+	 * And the slot set. A foreign root has already returned above, so the
+	 * stream's slots replace ours here (design P4 §3).
+	 */
+	dsl_crypto_key_slot_recv_sync(ds, nvl, tx);
 }
 
 static int
