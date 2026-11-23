@@ -21,7 +21,7 @@
 .\" Copyright 2019 Joyent, Inc.
 .\" Copyright 2026 Oxide Computer Company
 .\"
-.Dd January 30, 2026
+.Dd November 23, 2026
 .Dt ZFS-LOAD-KEY 8
 .Os
 .
@@ -33,6 +33,7 @@
 .Cm load-key
 .Op Fl nr
 .Op Fl L Ar keylocation
+.Op Fl S Ar slot
 .Fl a Ns | Ns Ar filesystem
 .Nm zfs
 .Cm unload-key
@@ -59,6 +60,7 @@
 .Cm load-key
 .Op Fl nr
 .Op Fl L Ar keylocation
+.Op Fl S Ar slot
 .Fl a Ns | Ns Ar filesystem
 .Xc
 Load the key for
@@ -71,6 +73,9 @@ The key will be expected in the format specified by the
 and location specified by the
 .Sy keylocation
 property.
+Selecting another key slot with
+.Fl S
+uses that slot's own parameters and source instead; see below.
 Note that if the
 .Sy keylocation
 is set to
@@ -119,6 +124,39 @@ or
 .Ar keylocation
 may only be given as
 .Sy prompt .
+.It Fl S Ar slot
+Load the key from the given key slot.
+The default is slot 1, the primary slot, so existing command lines keep
+their meaning.
+Slots other than the first require the
+.Sy keyslots
+pool feature.
+The source is taken from
+.Fl L
+when given; otherwise slot 1 reads the
+.Sy keylocation
+property and any other slot reads the corresponding
+.Sy keylocation_ Ns Ar slot
+property, failing with a request to use
+.Fl L
+if no usable source is stored.
+Combined with
+.Fl n
+this verifies the slot's key without loading it.
+.Pp
+Loading a slot that does not exist fails with
+.Dv ENOENT ,
+an incorrect key for an existing slot fails with
+.Dv EACCES ,
+an existing slot without a stored source fails with
+.Dv EINVAL ,
+and a slot whose encryption suite this system does not support fails with
+.Dv ZFS_ERR_CRYPTO_NOTSUP .
+Only
+.Cm load-key
+accepts this option;
+.Cm unload-key
+does not take it.
 .El
 .It Xo
 .Nm zfs

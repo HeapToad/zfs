@@ -898,6 +898,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/cli_root/zfs_load-key/zfs_load-key_location.ksh \
 	functional/cli_root/zfs_load-key/zfs_load-key_noop.ksh \
 	functional/cli_root/zfs_load-key/zfs_load-key_recursive.ksh \
+	functional/cli_root/zfs_load-key/zfs_load-key_slot.ksh \
 	functional/cli_root/zfs_mount/cleanup.ksh \
 	functional/cli_root/zfs_mount/setup.ksh \
 	functional/cli_root/zfs_mount/zfs_mount_001_pos.ksh \

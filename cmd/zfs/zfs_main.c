@@ -396,7 +396,7 @@ get_usage(zfs_help_t idx)
 		    "[-m <memory limit (b)>]\n"
 		    "\t    <pool> <program file> [lua args...]\n");
 	case HELP_LOAD_KEY:
-		return ("\tload-key [-rn] [-L <keylocation>] "
+		return ("\tload-key [-rn] [-L <keylocation>] [-S <slot>] "
 		    "<-a | filesystem|volume>\n");
 	case HELP_UNLOAD_KEY:
 		return ("\tunload-key [-r] "
@@ -8672,6 +8672,7 @@ typedef struct loadkey_cbdata {
 	boolean_t cb_recursive;
 	boolean_t cb_noop;
 	char *cb_keylocation;
+	uint64_t cb_slot;
 	uint64_t cb_numfailed;
 	uint64_t cb_numattempted;
 } loadkey_cbdata_t;
@@ -8704,7 +8705,8 @@ load_key_callback(zfs_handle_t *zhp, void *data)
 	cb->cb_numattempted++;
 
 	if (cb->cb_loadkey)
-		ret = zfs_crypto_load_key(zhp, cb->cb_noop, cb->cb_keylocation);
+		ret = zfs_crypto_load_key_slot(zhp, cb->cb_noop,
+		    cb->cb_keylocation, cb->cb_slot);
 	else
 		ret = zfs_crypto_unload_key(zhp);
 
@@ -8724,9 +8726,11 @@ load_unload_keys(int argc, char **argv, boolean_t loadkey)
 	loadkey_cbdata_t cb = { 0 };
 
 	cb.cb_loadkey = loadkey;
+	/* slot 1 is the primary slot, which is what plain load-key means */
+	cb.cb_slot = 1;
 
-	while ((c = getopt(argc, argv, "anrL:")) != -1) {
-		/* noop and alternate keylocations only apply to zfs load-key */
+	while ((c = getopt(argc, argv, "anrL:S:")) != -1) {
+		/* noop, keylocation and slot apply only to load-key */
 		if (loadkey) {
 			switch (c) {
 			case 'n':
@@ -8735,6 +8739,21 @@ load_unload_keys(int argc, char **argv, boolean_t loadkey)
 			case 'L':
 				cb.cb_keylocation = optarg;
 				continue;
+			case 'S': {
+				uint64_t slot;
+				char *endp;
+
+				if (optarg[0] < '0' || optarg[0] > '9')
+					usage(B_FALSE);
+
+				errno = 0;
+				slot = strtoull(optarg, &endp, 10);
+				if (errno != 0 || *endp != '\0' || slot == 0)
+					usage(B_FALSE);
+
+				cb.cb_slot = slot;
+				continue;
+			}
 			default:
 				break;
 			}
