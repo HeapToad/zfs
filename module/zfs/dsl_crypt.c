@@ -2468,6 +2468,63 @@ dsl_dataset_promote_crypt_check(dsl_dir_t *target, dsl_dir_t *origin)
 	return (0);
 }
 
+/*
+ * Move the per-slot key locations from the origin to the target while the
+ * encryption root moves, exactly as keylocation is moved: a location names the
+ * source of a slot entry, and the slot entries themselves follow ROOT_DDOBJ.
+ * The origin is cleared rather than copied, so no value sits in two places.
+ */
+static void
+dsl_crypto_key_slot_promote_locations(dsl_dir_t *origin,
+    dsl_dataset_t *targetds, dsl_dataset_t *originds, dmu_tx_t *tx)
+{
+	objset_t *mos = origin->dd_pool->dp_meta_objset;
+	uint64_t zapobj = dsl_dir_phys(origin)->dd_props_zapobj;
+	nvlist_t *names = NULL;
+	nvpair_t *elem;
+	zap_cursor_t *zc;
+	zap_attribute_t *za;
+	char *value;
+
+	/*
+	 * Collect the names first: clearing a property rewrites the ZAP being
+	 * walked, so the walk has to finish before the move starts.
+	 */
+	zc = kmem_alloc(sizeof (*zc), KM_SLEEP);
+	za = zap_attribute_alloc();
+	for (zap_cursor_init(zc, mos, zapobj);
+	    zap_cursor_retrieve(zc, za) == 0;
+	    zap_cursor_advance(zc)) {
+		if (!zfs_prop_keyslot_location(za->za_name, NULL))
+			continue;
+
+		if (names == NULL)
+			names = fnvlist_alloc();
+		fnvlist_add_boolean(names, za->za_name);
+	}
+	zap_cursor_fini(zc);
+	kmem_free(zc, sizeof (*zc));
+	zap_attribute_free(za);
+
+	if (names == NULL)
+		return;
+
+	value = kmem_alloc(ZAP_MAXVALUELEN, KM_SLEEP);
+	for (elem = nvlist_next_nvpair(names, NULL); elem != NULL;
+	    elem = nvlist_next_nvpair(names, elem)) {
+		const char *name = nvpair_name(elem);
+
+		VERIFY0(dsl_prop_get_dd(origin, name, 1, ZAP_MAXVALUELEN,
+		    value, NULL, B_FALSE));
+		dsl_prop_set_sync_impl(targetds, name, ZPROP_SRC_LOCAL, 1,
+		    strlen(value) + 1, value, tx);
+		dsl_prop_set_sync_impl(originds, name, ZPROP_SRC_NONE, 0, 0,
+		    NULL, tx);
+	}
+	kmem_free(value, ZAP_MAXVALUELEN);
+	nvlist_free(names);
+}
+
 void
 dsl_dataset_promote_crypt_sync(dsl_dir_t *target, dsl_dir_t *origin,
     dmu_tx_t *tx)
@@ -2508,6 +2565,8 @@ dsl_dataset_promote_crypt_sync(dsl_dir_t *target, dsl_dir_t *origin,
 	    ZPROP_SRC_LOCAL, 1, strlen(keylocation) + 1, keylocation, tx);
 	dsl_prop_set_sync_impl(originds, zfs_prop_to_name(ZFS_PROP_KEYLOCATION),
 	    ZPROP_SRC_NONE, 0, 0, NULL, tx);
+
+	dsl_crypto_key_slot_promote_locations(origin, targetds, originds, tx);
 
 	rw_enter(&dp->dp_spa->spa_keystore.sk_wkeys_lock, RW_WRITER);
 	spa_keystore_change_key_sync_impl(rddobj, origin->dd_object,
