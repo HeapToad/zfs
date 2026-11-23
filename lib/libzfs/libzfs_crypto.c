@@ -983,6 +983,26 @@ zfs_crypto_get_encryption_root(zfs_handle_t *zhp, boolean_t *is_encroot,
 	return (0);
 }
 
+/*
+ * Return a copy of the encryption root's alternate key slots, keyed by slot
+ * number. The stats channel carries them for the encryption root only, so
+ * callers must pass a root handle. A root with no slots yields an empty
+ * nvlist rather than an error; the copy belongs to the caller.
+ */
+int
+zfs_crypto_get_keyslots(zfs_handle_t *zhp, nvlist_t **keyslots_out)
+{
+	nvlist_t *slots;
+
+	if (zhp->zfs_props == NULL)
+		return (EINVAL);
+
+	if (nvlist_lookup_nvlist(zhp->zfs_props, "keyslots", &slots) != 0)
+		return (nvlist_alloc(keyslots_out, NV_UNIQUE_NAME, 0));
+
+	return (nvlist_dup(slots, keyslots_out, 0));
+}
+
 int
 zfs_crypto_create(libzfs_handle_t *hdl, char *parent_name, nvlist_t *props,
     nvlist_t *pool_props, boolean_t stdin_available, uint8_t **wkeydata_out,
@@ -1261,6 +1281,14 @@ int
 zfs_crypto_load_key(zfs_handle_t *zhp, boolean_t noop,
     const char *alt_keylocation)
 {
+	return (zfs_crypto_load_key_slot(zhp, noop, alt_keylocation,
+	    DSL_CRYPTO_KEY_SLOT_PRIMARY));
+}
+
+int
+zfs_crypto_load_key_slot(zfs_handle_t *zhp, boolean_t noop,
+    const char *alt_keylocation, uint64_t slot)
+{
 	int ret, attempts = 0;
 	char errbuf[ERRBUFLEN];
 	uint64_t keystatus, iters = 0, salt = 0;
@@ -1274,6 +1302,12 @@ zfs_crypto_load_key(zfs_handle_t *zhp, boolean_t noop,
 
 	(void) snprintf(errbuf, sizeof (errbuf),
 	    "Key load error");
+
+	if (slot == 0) {
+		zfs_error_aux(zhp->zfs_hdl, "Slot 0 is not a key slot.");
+		ret = EINVAL;
+		goto error;
+	}
 
 	/* check that encryption is enabled for the pool */
 	if (!encryption_feature_is_enabled(zhp->zpool_hdl)) {
@@ -1311,12 +1345,47 @@ zfs_crypto_load_key(zfs_handle_t *zhp, boolean_t noop,
 	}
 
 	/*
+	 * A slot above the primary one carries its own derivation parameters,
+	 * which the kernel publishes through the "keyslots" stats entry. Check
+	 * that the slot exists before prompting for, or fetching, any key.
+	 */
+	if (slot >= DSL_CRYPTO_KEY_SLOT_PRIMARY + 1) {
+		nvlist_t *slots = NULL, *slotnvl = NULL;
+		char name[32];
+
+		ret = zfs_crypto_get_keyslots(zhp, &slots);
+		if (ret != 0) {
+			zfs_error_aux(zhp->zfs_hdl,
+			    "Failed to get key slots for '%s'.",
+			    zfs_get_name(zhp));
+			goto error;
+		}
+
+		(void) snprintf(name, sizeof (name), "%llu",
+		    (u_longlong_t)slot);
+		if (nvlist_lookup_nvlist(slots, name, &slotnvl) != 0) {
+			zfs_error_aux(zhp->zfs_hdl,
+			    "key slot %llu does not exist",
+			    (u_longlong_t)slot);
+			nvlist_free(slots);
+			ret = ENOENT;
+			goto error;
+		}
+
+		keyformat = ZFS_KEYFORMAT_NONE;
+		(void) nvlist_lookup_uint64(slotnvl, "keyformat", &keyformat);
+		(void) nvlist_lookup_uint64(slotnvl, "pbkdf2salt", &salt);
+		(void) nvlist_lookup_uint64(slotnvl, "pbkdf2iters", &iters);
+		nvlist_free(slots);
+	}
+
+	/*
 	 * if the caller has elected to override the keylocation property
 	 * use that instead
 	 */
 	if (alt_keylocation != NULL) {
 		keylocation = alt_keylocation;
-	} else {
+	} else if (slot == DSL_CRYPTO_KEY_SLOT_PRIMARY) {
 		ret = zfs_prop_get(zhp, ZFS_PROP_KEYLOCATION, prop_keylocation,
 		    sizeof (prop_keylocation), NULL, NULL, 0, B_TRUE);
 		if (ret != 0) {
@@ -1326,6 +1395,42 @@ zfs_crypto_load_key(zfs_handle_t *zhp, boolean_t noop,
 			goto error;
 		}
 
+		keylocation = prop_keylocation;
+	} else {
+		nvlist_t *props = zfs_get_user_props(zhp);
+		nvlist_t *propval;
+		const char *loc = NULL;
+		char name[40];
+
+		/*
+		 * keylocation_<n> is an unregistered property, so it can
+		 * only be read out of the user property nvlist.
+		 */
+		(void) snprintf(name, sizeof (name), "keylocation_%llu",
+		    (u_longlong_t)slot);
+		if (props != NULL &&
+		    nvlist_lookup_nvlist(props, name, &propval) == 0)
+			(void) nvlist_lookup_string(propval, ZPROP_VALUE,
+			    &loc);
+
+		/* a stored "none" is not a usable source (design P5 §3) */
+		if (loc == NULL || strcmp(loc, "none") == 0) {
+			zfs_error_aux(zhp->zfs_hdl,
+			    "slot %llu has no stored keylocation; "
+			    "specify -L", (u_longlong_t)slot);
+			ret = EINVAL;
+			goto error;
+		}
+
+		if (strlen(loc) >= sizeof (prop_keylocation)) {
+			zfs_error_aux(zhp->zfs_hdl,
+			    "keylocation_%llu is too long", (u_longlong_t)slot);
+			ret = EINVAL;
+			goto error;
+		}
+
+		(void) strlcpy(prop_keylocation, loc,
+		    sizeof (prop_keylocation));
 		keylocation = prop_keylocation;
 	}
 
@@ -1341,7 +1446,8 @@ zfs_crypto_load_key(zfs_handle_t *zhp, boolean_t noop,
 	}
 
 	/* passphrase formats require a salt and pbkdf2_iters property */
-	if (keyformat == ZFS_KEYFORMAT_PASSPHRASE) {
+	if (slot == DSL_CRYPTO_KEY_SLOT_PRIMARY &&
+	    keyformat == ZFS_KEYFORMAT_PASSPHRASE) {
 		salt = zfs_prop_get_int(zhp, ZFS_PROP_PBKDF2_SALT);
 		iters = zfs_prop_get_int(zhp, ZFS_PROP_PBKDF2_ITERS);
 	}
@@ -1366,7 +1472,8 @@ try_again:
 	correctible = B_FALSE;
 
 	/* pass the wrapping key and noop flag to the ioctl */
-	ret = lzc_load_key(zhp->zfs_name, noop, key_data, WRAPPING_KEY_LEN);
+	ret = lzc_load_key_slot(zhp->zfs_name, noop, key_data,
+	    WRAPPING_KEY_LEN, slot);
 	if (ret != 0) {
 		switch (ret) {
 		case EPERM:
@@ -1391,6 +1498,15 @@ try_again:
 			zfs_error_aux(zhp->zfs_hdl,
 			    "Incorrect key provided for '%s'.",
 			    zfs_get_name(zhp));
+			break;
+		case ENOENT:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "key slot %llu does not exist",
+			    (u_longlong_t)slot);
+			break;
+		case ENOTSUP:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "pool does not have the keyslots feature enabled");
 			break;
 		case ZFS_ERR_CRYPTO_NOTSUP:
 			zfs_error_aux(zhp->zfs_hdl,

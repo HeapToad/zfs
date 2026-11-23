@@ -604,12 +604,15 @@ _LIBZFS_H int zfs_wait_status(zfs_handle_t *, zfs_wait_activity_t,
  */
 _LIBZFS_H int zfs_crypto_get_encryption_root(zfs_handle_t *, boolean_t *,
     char *);
+_LIBZFS_H int zfs_crypto_get_keyslots(zfs_handle_t *, nvlist_t **);
 _LIBZFS_H int zfs_crypto_create(libzfs_handle_t *, char *, nvlist_t *,
     nvlist_t *, boolean_t stdin_available, uint8_t **, uint_t *);
 _LIBZFS_H int zfs_crypto_clone_check(libzfs_handle_t *, zfs_handle_t *, char *,
     nvlist_t *);
 _LIBZFS_H int zfs_crypto_attempt_load_keys(libzfs_handle_t *, const char *);
 _LIBZFS_H int zfs_crypto_load_key(zfs_handle_t *, boolean_t, const char *);
+_LIBZFS_H int zfs_crypto_load_key_slot(zfs_handle_t *, boolean_t,
+    const char *, uint64_t);
 _LIBZFS_H int zfs_crypto_unload_key(zfs_handle_t *);
 _LIBZFS_H int zfs_crypto_rewrap(zfs_handle_t *, nvlist_t *, boolean_t);
 _LIBZFS_H boolean_t zfs_is_encrypted(zfs_handle_t *);
