@@ -173,10 +173,10 @@ permission, not by
 .Ar filesystem Ns | Ns Ar volume
 .Xc
 Removes a key slot.
-The slot's key material is deleted and the location stored for it is cleared in
-the same transaction, so the slot can no longer unlock the dataset.
-On a dataset that received the location from a stream, the received value is not
-deleted, but the slot is gone and the value has no effect.
+The slot's key material and the location stored for it are deleted in the same
+transaction, so the slot can no longer unlock the dataset.
+A location that the dataset received from a stream is deleted as well, so no
+stored source is left behind for a slot that does not exist.
 Slot 1 cannot be removed, and slot 0 is not a slot.
 The key must be loaded, so a recovery slot cannot be removed while the root is
 locked.

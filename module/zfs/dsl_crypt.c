@@ -1259,12 +1259,17 @@ dsl_crypto_key_slot_remove_sync(dsl_dataset_t *ds,
 
 	/*
 	 * The slot's source is a property, and a location must not outlive its
-	 * slot, so it goes in the same transaction. ZPROP_SRC_NONE tolerates a
-	 * missing entry: a slot may have been created without a location.
+	 * slot, so it goes in the same transaction. Clearing local as well as
+	 * received removes the value in every layer; ZPROP_SRC_NONE alone would
+	 * revert to a received value instead, leaving a location behind for a
+	 * slot that no longer exists. Missing entries are tolerated in both
+	 * cases, so a slot created without a location still removes cleanly.
 	 */
 	(void) snprintf(name, sizeof (name), "keylocation_%llu",
 	    (u_longlong_t)slot);
-	dsl_prop_set_sync_impl(ds, name, ZPROP_SRC_NONE, 0, 0, NULL, tx);
+	dsl_prop_set_sync_impl(ds, name,
+	    ZPROP_SRC_NONE | ZPROP_SRC_LOCAL | ZPROP_SRC_RECEIVED, 0, 0, NULL,
+	    tx);
 }
 
 static int
