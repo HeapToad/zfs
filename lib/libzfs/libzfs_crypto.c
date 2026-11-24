@@ -1762,6 +1762,111 @@ error:
 	return (ret);
 }
 
+/*
+ * Remove a key slot from an encryption root. Slot 1 is the compatibility floor
+ * and is never removed. Removal is metadata-only, but it still requires the
+ * root's key to be loaded (design P5 section 12), so a recovery slot cannot be
+ * removed without the primary key. The kernel deletes the slot's
+ * keylocation_<n> in the same transaction.
+ */
+int
+zfs_crypto_remove_keyslot(zfs_handle_t *zhp, uint64_t slot)
+{
+	int ret;
+	char errbuf[ERRBUFLEN];
+	char prop_encroot[MAXNAMELEN];
+	boolean_t is_encroot;
+
+	(void) snprintf(errbuf, sizeof (errbuf),
+	    "Key slot remove error");
+
+	if (slot == 0) {
+		zfs_error_aux(zhp->zfs_hdl, "Slot 0 is not a key slot.");
+		ret = EINVAL;
+		goto error;
+	}
+
+	if (slot == DSL_CRYPTO_KEY_SLOT_PRIMARY) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "slot 1 is the primary slot and cannot be removed");
+		ret = EINVAL;
+		goto error;
+	}
+
+	if (zfs_prop_get_int(zhp, ZFS_PROP_ENCRYPTION) == ZIO_CRYPT_OFF) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "'%s' is not encrypted.", zfs_get_name(zhp));
+		ret = EINVAL;
+		goto error;
+	}
+
+	/* slots live on the encryption root's key object, as for add */
+	ret = zfs_crypto_get_encryption_root(zhp, &is_encroot, prop_encroot);
+	if (ret != 0) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "Failed to get encryption root for '%s'.",
+		    zfs_get_name(zhp));
+		goto error;
+	} else if (!is_encroot) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "Key slots must be removed from the encryption root of "
+		    "'%s' (%s).", zfs_get_name(zhp), prop_encroot);
+		ret = EINVAL;
+		goto error;
+	}
+
+	if (!feature_is_enabled(zhp->zpool_hdl, SPA_FEATURE_KEYSLOTS)) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "pool does not have the keyslots feature enabled");
+		ret = ENOTSUP;
+		goto error;
+	}
+
+	if (zfs_prop_get_int(zhp, ZFS_PROP_KEYSTATUS) !=
+	    ZFS_KEYSTATUS_AVAILABLE) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "key must be loaded to remove a slot");
+		ret = EACCES;
+		goto error;
+	}
+
+	ret = lzc_keyslot_remove(zhp->zfs_name, slot);
+	if (ret != 0) {
+		switch (ret) {
+		case EPERM:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "Permission denied.");
+			break;
+		case EACCES:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "key must be loaded to remove a slot");
+			break;
+		case ENOENT:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "key slot %llu does not exist",
+			    (u_longlong_t)slot);
+			break;
+		case EINVAL:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "Invalid parameters provided for dataset %s.",
+			    zfs_get_name(zhp));
+			break;
+		case ENOTSUP:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "pool does not have the keyslots feature enabled");
+			break;
+		}
+		goto error;
+	}
+
+	return (0);
+
+error:
+	zfs_error(zhp->zfs_hdl, EZFS_CRYPTOFAILED, errbuf);
+
+	return (ret);
+}
+
 int
 zfs_crypto_unload_key(zfs_handle_t *zhp)
 {
