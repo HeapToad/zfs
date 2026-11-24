@@ -107,6 +107,7 @@ static int zfs_do_channel_program(int argc, char **argv);
 static int zfs_do_load_key(int argc, char **argv);
 static int zfs_do_unload_key(int argc, char **argv);
 static int zfs_do_change_key(int argc, char **argv);
+static int zfs_do_keyslot(int argc, char **argv);
 static int zfs_do_project(int argc, char **argv);
 static int zfs_do_version(int argc, char **argv);
 static int zfs_do_redact(int argc, char **argv);
@@ -163,6 +164,7 @@ typedef enum {
 	HELP_LOAD_KEY,
 	HELP_UNLOAD_KEY,
 	HELP_CHANGE_KEY,
+	HELP_KEYSLOT,
 	HELP_VERSION,
 	HELP_REDACT,
 	HELP_REWRITE,
@@ -234,6 +236,7 @@ static zfs_command_t command_table[] = {
 	{ "load-key",	zfs_do_load_key,	HELP_LOAD_KEY		},
 	{ "unload-key",	zfs_do_unload_key,	HELP_UNLOAD_KEY		},
 	{ "change-key",	zfs_do_change_key,	HELP_CHANGE_KEY		},
+	{ "keyslot",	zfs_do_keyslot,		HELP_KEYSLOT		},
 	{ NULL },
 	{ "program",	zfs_do_channel_program,	HELP_CHANNEL_PROGRAM	},
 	{ "rewrite",	zfs_do_rewrite,		HELP_REWRITE		},
@@ -406,6 +409,12 @@ get_usage(zfs_help_t idx)
 		    "\t    [-o keylocation=<value>] [-o pbkdf2iters=<value>]\n"
 		    "\t    <filesystem|volume>\n"
 		    "\tchange-key -i [-l] <filesystem|volume>\n");
+	case HELP_KEYSLOT:
+		return ("\tkeyslot add [-S <slot>] [-o keyformat=<value>]\n"
+		    "\t    [-o keylocation=<value>] [-o pbkdf2iters=<value>]\n"
+		    "\t    <filesystem|volume>\n"
+		    "\tkeyslot remove -S <slot> <filesystem|volume>\n"
+		    "\tkeyslot list [-Hp] <filesystem|volume>\n");
 	case HELP_VERSION:
 		return ("\tversion [-j]\n");
 	case HELP_REDACT:
@@ -8723,6 +8732,29 @@ load_key_callback(zfs_handle_t *zhp, void *data)
 	return (0);
 }
 
+/*
+ * Parse a key slot number. Slot 0 is not a slot: it is how the add ioctl
+ * spells "allocate one", so an explicit 0 is a usage error rather than a
+ * request to allocate.
+ */
+static boolean_t
+parse_slot(const char *arg, uint64_t *slotp)
+{
+	uint64_t slot;
+	char *endp;
+
+	if (arg[0] < '0' || arg[0] > '9')
+		return (B_FALSE);
+
+	errno = 0;
+	slot = strtoull(arg, &endp, 10);
+	if (errno != 0 || *endp != '\0' || slot == 0)
+		return (B_FALSE);
+
+	*slotp = slot;
+	return (B_TRUE);
+}
+
 static int
 load_unload_keys(int argc, char **argv, boolean_t loadkey)
 {
@@ -8746,14 +8778,8 @@ load_unload_keys(int argc, char **argv, boolean_t loadkey)
 				continue;
 			case 'S': {
 				uint64_t slot;
-				char *endp;
 
-				if (optarg[0] < '0' || optarg[0] > '9')
-					usage(B_FALSE);
-
-				errno = 0;
-				slot = strtoull(optarg, &endp, 10);
-				if (errno != 0 || *endp != '\0' || slot == 0)
+				if (!parse_slot(optarg, &slot))
 					usage(B_FALSE);
 
 				cb.cb_slot = slot;
@@ -8906,6 +8932,292 @@ zfs_do_change_key(int argc, char **argv)
 	nvlist_free(props);
 	zfs_close(zhp);
 	return (0);
+}
+
+static int
+keyslot_cmp(const void *a, const void *b)
+{
+	uint64_t x = *(const uint64_t *)a;
+	uint64_t y = *(const uint64_t *)b;
+
+	if (x < y)
+		return (-1);
+	if (x > y)
+		return (1);
+	return (0);
+}
+
+static const char *
+keyslot_keyformat(uint64_t keyformat, char *buf, size_t len,
+    boolean_t parsable)
+{
+	const char *name;
+
+	if (parsable) {
+		(void) snprintf(buf, len, "%llu", (u_longlong_t)keyformat);
+		return (buf);
+	}
+
+	if (zfs_prop_index_to_string(ZFS_PROP_KEYFORMAT, keyformat,
+	    &name) != 0)
+		return ("-");
+
+	return (name);
+}
+
+/*
+ * Slot n >= 2's source is an unregistered property, so it can only be read out
+ * of the user property nvlist, as the load path does.
+ */
+static const char *
+keyslot_location(zfs_handle_t *zhp, uint64_t slot)
+{
+	nvlist_t *props = zfs_get_user_props(zhp);
+	nvlist_t *propval;
+	const char *loc = NULL;
+	char name[40];
+
+	(void) snprintf(name, sizeof (name), "keylocation_%llu",
+	    (u_longlong_t)slot);
+
+	if (props != NULL && nvlist_lookup_nvlist(props, name, &propval) == 0)
+		(void) nvlist_lookup_string(propval, ZPROP_VALUE, &loc);
+
+	return (loc != NULL ? loc : "-");
+}
+
+/*
+ * Print one row per key slot of an encryption root, slot 1 included, sorted by
+ * slot number. Parameters come from the stats channel and sources from the
+ * property layer (design P5 §1, §10); the channel carries no sealed material,
+ * so no key or wrapped key is ever printed.
+ */
+static int
+zfs_do_keyslot_list(zfs_handle_t *zhp, boolean_t scripted, boolean_t parsable)
+{
+	int ret;
+	char encroot[MAXNAMELEN];
+	char kfbuf[32];
+	char prop_keylocation[MAXNAMELEN];
+	boolean_t is_encroot;
+	nvlist_t *slots = NULL, *slotnvl;
+	nvpair_t *elem;
+	uint64_t *nums = NULL, n = 0, i;
+
+	if (zfs_prop_get_int(zhp, ZFS_PROP_ENCRYPTION) == ZIO_CRYPT_OFF) {
+		(void) fprintf(stderr, "'%s' is not encrypted.\n",
+		    zfs_get_name(zhp));
+		return (-1);
+	}
+
+	ret = zfs_crypto_get_encryption_root(zhp, &is_encroot, encroot);
+	if (ret != 0) {
+		(void) fprintf(stderr,
+		    "Failed to get encryption root for '%s'.\n",
+		    zfs_get_name(zhp));
+		return (-1);
+	}
+	if (!is_encroot) {
+		(void) fprintf(stderr,
+		    "Key slots must be listed for the encryption root of '%s' "
+		    "(%s).\n", zfs_get_name(zhp), encroot);
+		return (-1);
+	}
+
+	ret = zfs_crypto_get_keyslots(zhp, &slots);
+	if (ret != 0) {
+		(void) fprintf(stderr, "Failed to get key slots for '%s'.\n",
+		    zfs_get_name(zhp));
+		return (-1);
+	}
+
+	/* collect and sort, so the rows come out in slot order */
+	for (elem = nvlist_next_nvpair(slots, NULL); elem != NULL;
+	    elem = nvlist_next_nvpair(slots, elem))
+		n++;
+
+	if (n > 0) {
+		uint64_t k = 0;
+
+		nums = calloc(n, sizeof (uint64_t));
+		if (nums == NULL)
+			nomem();
+
+		for (elem = nvlist_next_nvpair(slots, NULL); elem != NULL;
+		    elem = nvlist_next_nvpair(slots, elem)) {
+			if (nvpair_type(elem) != DATA_TYPE_NVLIST)
+				continue;
+			nums[k++] = strtoull(nvpair_name(elem), NULL, 10);
+		}
+
+		qsort(nums, k, sizeof (uint64_t), keyslot_cmp);
+		n = k;
+	}
+
+	if (!scripted)
+		(void) printf("%-5s %-11s %-20s %-20s %s\n", "SLOT",
+		    "KEYFORMAT", "PBKDF2SALT", "PBKDF2ITERS", "KEYLOCATION");
+
+	/* slot 1 is not in the channel: its parameters are the dataset's own */
+	if (zfs_prop_get(zhp, ZFS_PROP_KEYLOCATION, prop_keylocation,
+	    sizeof (prop_keylocation), NULL, NULL, 0, B_TRUE) != 0 ||
+	    prop_keylocation[0] == '\0')
+		(void) strlcpy(prop_keylocation, "-",
+		    sizeof (prop_keylocation));
+
+	(void) printf("%-5d %-11s %-20llu %-20llu %s\n", 1,
+	    keyslot_keyformat(zfs_prop_get_int(zhp, ZFS_PROP_KEYFORMAT),
+	    kfbuf, sizeof (kfbuf), parsable),
+	    (u_longlong_t)zfs_prop_get_int(zhp, ZFS_PROP_PBKDF2_SALT),
+	    (u_longlong_t)zfs_prop_get_int(zhp, ZFS_PROP_PBKDF2_ITERS),
+	    prop_keylocation);
+
+	for (i = 0; i < n; i++) {
+		char name[32];
+		uint64_t keyformat = ZFS_KEYFORMAT_NONE, salt = 0, iters = 0;
+
+		(void) snprintf(name, sizeof (name), "%llu",
+		    (u_longlong_t)nums[i]);
+		if (nvlist_lookup_nvlist(slots, name, &slotnvl) != 0)
+			continue;
+
+		(void) nvlist_lookup_uint64(slotnvl, "keyformat", &keyformat);
+		(void) nvlist_lookup_uint64(slotnvl, "pbkdf2salt", &salt);
+		(void) nvlist_lookup_uint64(slotnvl, "pbkdf2iters", &iters);
+
+		(void) printf("%-5llu %-11s %-20llu %-20llu %s\n",
+		    (u_longlong_t)nums[i],
+		    keyslot_keyformat(keyformat, kfbuf, sizeof (kfbuf),
+		    parsable), (u_longlong_t)salt, (u_longlong_t)iters,
+		    keyslot_location(zhp, nums[i]));
+	}
+
+	free(nums);
+	nvlist_free(slots);
+
+	return (0);
+}
+
+/*
+ * zfs keyslot add|remove|list
+ *
+ * Slots are alternate wrappings of an encryption root's wrapping key, so every
+ * verb targets the root itself; libzfs refuses a non-root and names the root.
+ */
+static int
+zfs_do_keyslot(int argc, char **argv)
+{
+	int c, ret;
+	const char *verb;
+	uint64_t slot = 0, slot_out = 0;
+	boolean_t scripted = B_FALSE, parsable = B_FALSE;
+	nvlist_t *props = NULL;
+	zfs_handle_t *zhp;
+
+	if (argc < 2) {
+		(void) fprintf(stderr, "Missing keyslot subcommand\n");
+		usage(B_FALSE);
+	}
+
+	verb = argv[1];
+	if (strcmp(verb, "add") != 0 && strcmp(verb, "remove") != 0 &&
+	    strcmp(verb, "list") != 0) {
+		(void) fprintf(stderr, "Invalid keyslot subcommand '%s'\n",
+		    verb);
+		usage(B_FALSE);
+	}
+
+	/* getopt() parses what follows the subcommand */
+	argc--;
+	argv++;
+
+	if (strcmp(verb, "add") == 0) {
+		props = fnvlist_alloc();
+		while ((c = getopt(argc, argv, "S:o:")) != -1) {
+			switch (c) {
+			case 'S':
+				if (!parse_slot(optarg, &slot))
+					usage(B_FALSE);
+				break;
+			case 'o':
+				if (!parseprop(props, optarg)) {
+					nvlist_free(props);
+					return (1);
+				}
+				break;
+			default:
+				(void) fprintf(stderr,
+				    "invalid option '%c'\n", optopt);
+				usage(B_FALSE);
+			}
+		}
+	} else if (strcmp(verb, "remove") == 0) {
+		while ((c = getopt(argc, argv, "S:")) != -1) {
+			switch (c) {
+			case 'S':
+				if (!parse_slot(optarg, &slot))
+					usage(B_FALSE);
+				break;
+			default:
+				(void) fprintf(stderr,
+				    "invalid option '%c'\n", optopt);
+				usage(B_FALSE);
+			}
+		}
+
+		if (slot == 0) {
+			(void) fprintf(stderr, "Missing -S <slot>\n");
+			usage(B_FALSE);
+		}
+	} else {
+		while ((c = getopt(argc, argv, "Hp")) != -1) {
+			switch (c) {
+			case 'H':
+				scripted = B_TRUE;
+				break;
+			case 'p':
+				parsable = B_TRUE;
+				break;
+			default:
+				(void) fprintf(stderr,
+				    "invalid option '%c'\n", optopt);
+				usage(B_FALSE);
+			}
+		}
+	}
+
+	argc -= optind;
+	argv += optind;
+
+	if (argc < 1) {
+		(void) fprintf(stderr, "Missing dataset argument\n");
+		usage(B_FALSE);
+	}
+
+	if (argc > 1) {
+		(void) fprintf(stderr, "Too many arguments\n");
+		usage(B_FALSE);
+	}
+
+	zhp = zfs_open(g_zfs, argv[0], ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME);
+	if (zhp == NULL)
+		usage(B_FALSE);
+
+	if (strcmp(verb, "add") == 0) {
+		ret = zfs_crypto_add_keyslot(zhp, slot, props, &slot_out);
+		if (ret == 0)
+			(void) printf("added key slot %llu to '%s'\n",
+			    (u_longlong_t)slot_out, zfs_get_name(zhp));
+	} else if (strcmp(verb, "remove") == 0) {
+		ret = zfs_crypto_remove_keyslot(zhp, slot);
+	} else {
+		ret = zfs_do_keyslot_list(zhp, scripted, parsable);
+	}
+
+	nvlist_free(props);
+	zfs_close(zhp);
+
+	return (ret == 0 ? 0 : -1);
 }
 
 /*
