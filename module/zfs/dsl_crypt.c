@@ -864,10 +864,17 @@ dsl_crypto_key_slot_add_check(dsl_dataset_t *ds,
 	    args->dcks_salt, args->dcks_iters))
 		return (SET_ERROR(EINVAL));
 
-	/* an optional location must be usable */
-	if (args->dcks_keylocation != NULL &&
-	    !zfs_prop_valid_keylocation(args->dcks_keylocation, B_TRUE))
-		return (SET_ERROR(EINVAL));
+	/*
+	 * An optional location must be usable and must fit: the sync pass
+	 * turns it into a ZAP value, where an over-long one has no way to
+	 * report failure.
+	 */
+	if (args->dcks_keylocation != NULL) {
+		if (!zfs_prop_valid_keylocation(args->dcks_keylocation, B_TRUE))
+			return (SET_ERROR(EINVAL));
+		if (strlen(args->dcks_keylocation) >= ZAP_MAXVALUELEN)
+			return (SET_ERROR(E2BIG));
+	}
 
 	/* resolve or allocate the slot number */
 	if (args->dcks_slot != 0) {
@@ -936,12 +943,80 @@ dsl_crypto_key_slot_add_sync(dsl_dataset_t *ds,
 	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, args->dcks_slot,
 	    DSL_CRYPTO_KEY_SLOT_PBKDF2ITERS, 8, 1, &args->dcks_iters, tx));
 
+	/*
+	 * The slot's source is user-facing config, so it lives in the
+	 * property layer like slot 1's keylocation. Writing it in this
+	 * transaction keeps the property and the entries in step
+	 * (design P5 §11).
+	 */
+	if (args->dcks_keylocation != NULL) {
+		char name[DSL_CRYPTO_KEY_SLOT_NAME_MAX];
+
+		(void) snprintf(name, sizeof (name), "keylocation_%llu",
+		    (u_longlong_t)args->dcks_slot);
+		dsl_prop_set_sync_impl(ds, name, ZPROP_SRC_LOCAL, 1,
+		    strlen(args->dcks_keylocation) + 1,
+		    args->dcks_keylocation, tx);
+	}
+
 	/* the first slot write activates the feature on this dataset */
 	if (!dsl_dataset_feature_is_active(ds, SPA_FEATURE_KEYSLOTS)) {
 		dsl_dataset_activate_feature(ds->ds_object,
 		    SPA_FEATURE_KEYSLOTS, (void *)B_TRUE, tx);
 		ds->ds_feature[SPA_FEATURE_KEYSLOTS] = (void *)B_TRUE;
 	}
+}
+
+typedef struct spa_keystore_keyslot_add_args {
+	const char *skkaa_dsname;
+	dsl_crypto_key_slot_args_t *skkaa_args;
+} spa_keystore_keyslot_add_args_t;
+
+static int
+spa_keystore_keyslot_add_check(void *arg, dmu_tx_t *tx)
+{
+	spa_keystore_keyslot_add_args_t *skkaa = arg;
+	dsl_pool_t *dp = dmu_tx_pool(tx);
+	dsl_dataset_t *ds;
+	int ret;
+
+	ret = dsl_dataset_hold(dp, skkaa->skkaa_dsname, FTAG, &ds);
+	if (ret != 0)
+		return (ret);
+
+	ret = dsl_crypto_key_slot_add_check(ds, skkaa->skkaa_args);
+	dsl_dataset_rele(ds, FTAG);
+
+	return (ret);
+}
+
+static void
+spa_keystore_keyslot_add_sync(void *arg, dmu_tx_t *tx)
+{
+	spa_keystore_keyslot_add_args_t *skkaa = arg;
+	dsl_pool_t *dp = dmu_tx_pool(tx);
+	dsl_dataset_t *ds;
+
+	VERIFY0(dsl_dataset_hold(dp, skkaa->skkaa_dsname, FTAG, &ds));
+	dsl_crypto_key_slot_add_sync(ds, skkaa->skkaa_args, tx);
+	dsl_dataset_rele(ds, FTAG);
+}
+
+/*
+ * Add a key slot to an encryption root. Every failure condition lives in the
+ * check pass, so the sync pass cannot fail.
+ */
+int
+spa_keystore_keyslot_add(const char *dsname, dsl_crypto_key_slot_args_t *args)
+{
+	spa_keystore_keyslot_add_args_t skkaa;
+
+	skkaa.skkaa_dsname = dsname;
+	skkaa.skkaa_args = args;
+
+	return (dsl_sync_task(dsname, spa_keystore_keyslot_add_check,
+	    spa_keystore_keyslot_add_sync, &skkaa, 15,
+	    ZFS_SPACE_CHECK_RESERVED));
 }
 
 /*

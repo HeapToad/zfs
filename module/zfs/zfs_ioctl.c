@@ -1485,6 +1485,13 @@ zfs_secpolicy_change_key(zfs_cmd_t *zc, nvlist_t *innvl, cred_t *cr)
 	    ZFS_DELEG_PERM_CHANGE_KEY, cr));
 }
 
+static int
+zfs_secpolicy_keyslot(zfs_cmd_t *zc, nvlist_t *innvl, cred_t *cr)
+{
+	return (zfs_secpolicy_write_perms(zc->zc_name,
+	    ZFS_DELEG_PERM_KEYSLOT, cr));
+}
+
 /*
  * Returns the nvlist as specified by the user in the zfs_cmd_t.
  */
@@ -7946,6 +7953,77 @@ error:
 	return (ret);
 }
 
+/*
+ * Add a key slot to an encryption root's key object. The slot's wrapping key
+ * is derived in userspace and travels in hidden_args, like load-key's.
+ *
+ * innvl: {
+ *     (optional) "slot" -> uint64
+ *         slot to add; 0 allocates the lowest free slot
+ *     (optional) "props" -> { prop -> value }
+ *         keyformat, keylocation, pbkdf2salt, pbkdf2iters
+ *     "hidden_args" -> { "wkeydata" -> value }
+ *         raw uint8_t array of the slot's wrapping key data (32 bytes)
+ * }
+ *
+ * outnvl: {
+ *     "slot" -> uint64
+ *         the slot that was added
+ * }
+ */
+static const zfs_ioc_key_t zfs_keys_keyslot_add[] = {
+	{"slot",		DATA_TYPE_UINT64,	ZK_OPTIONAL},
+	{"props",		DATA_TYPE_NVLIST,	ZK_OPTIONAL},
+	{"hidden_args",		DATA_TYPE_NVLIST,	0},
+};
+
+static int
+zfs_ioc_keyslot_add(const char *dsname, nvlist_t *innvl, nvlist_t *outnvl)
+{
+	int ret;
+	uint64_t slot = 0;
+	nvlist_t *props = NULL, *hidden_args = NULL;
+	dsl_crypto_params_t *dcp = NULL;
+	dsl_crypto_key_slot_args_t args = { 0 };
+
+	if (strchr(dsname, '@') != NULL || strchr(dsname, '%') != NULL)
+		return (SET_ERROR(EINVAL));
+
+	(void) nvlist_lookup_uint64(innvl, "slot", &slot);
+	(void) nvlist_lookup_nvlist(innvl, "props", &props);
+	(void) nvlist_lookup_nvlist(innvl, ZPOOL_HIDDEN_ARGS, &hidden_args);
+
+	ret = dsl_crypto_params_create_nvlist(DCP_CMD_NONE, props, hidden_args,
+	    &dcp);
+	if (ret != 0)
+		goto out;
+
+	/* the slot's wrapping key is derived by the caller; it is required */
+	if (dcp->cp_wkey == NULL) {
+		ret = SET_ERROR(EINVAL);
+		goto out;
+	}
+
+	args.dcks_slot = slot;
+	args.dcks_keyformat = dcp->cp_wkey->wk_keyformat;
+	args.dcks_salt = dcp->cp_wkey->wk_salt;
+	args.dcks_iters = dcp->cp_wkey->wk_iters;
+	args.dcks_keylocation = dcp->cp_keylocation;
+	memcpy(args.dcks_wkey_n, dcp->cp_wkey->wk_key.ck_data,
+	    WRAPPING_KEY_LEN);
+
+	ret = spa_keystore_keyslot_add(dsname, &args);
+	if (ret == 0)
+		fnvlist_add_uint64(outnvl, "slot", args.dcks_slot);
+
+out:
+	/* args holds the slot key and the root's wrapping key */
+	memset(&args, 0, sizeof (args));
+	dsl_crypto_params_free(dcp, B_TRUE);
+
+	return (ret);
+}
+
 static zfs_ioc_vec_t zfs_ioc_vec[ZFS_IOC_LAST - ZFS_IOC_FIRST] = { 0 };
 
 static void
@@ -8159,6 +8237,11 @@ zfs_ioctl_init(void)
 	    DATASET_NAME, POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY,
 	    B_TRUE, B_TRUE, zfs_keys_change_key,
 	    ARRAY_SIZE(zfs_keys_change_key));
+	zfs_ioctl_register("keyslot-add", ZFS_IOC_KEYSLOT_ADD,
+	    zfs_ioc_keyslot_add, zfs_secpolicy_keyslot,
+	    DATASET_NAME, POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY,
+	    B_TRUE, B_TRUE, zfs_keys_keyslot_add,
+	    ARRAY_SIZE(zfs_keys_keyslot_add));
 
 	zfs_ioctl_register("sync", ZFS_IOC_POOL_SYNC,
 	    zfs_ioc_pool_sync, zfs_secpolicy_none, POOL_NAME,
