@@ -1320,6 +1320,17 @@ zfs_secpolicy_inherit_prop(zfs_cmd_t *zc, nvlist_t *innvl, cred_t *cr)
 	(void) innvl;
 	zfs_prop_t prop = zfs_name_to_prop(zc->zc_value);
 
+	/*
+	 * A per-slot location is an unregistered name that is not a user
+	 * property. Check it exactly as slot 1's keylocation is checked, as
+	 * zfs_check_settable() does. This function also guards the receive
+	 * path that clears and restores received properties, so without this
+	 * branch an incoming keylocation_<n> is reported as invalid.
+	 */
+	if (zfs_prop_keyslot_location(zc->zc_value, NULL))
+		return (zfs_secpolicy_setprop(zc->zc_name,
+		    ZFS_PROP_KEYLOCATION, NULL, cr));
+
 	if (prop == ZPROP_USERPROP) {
 		if (!zfs_prop_user(zc->zc_value))
 			return (SET_ERROR(EINVAL));
