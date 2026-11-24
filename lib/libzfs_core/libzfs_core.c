@@ -1907,6 +1907,70 @@ lzc_change_key(const char *fsname, uint64_t crypt_cmd, nvlist_t *props,
 	return (error);
 }
 
+/*
+ * Add a key slot to an encryption root. The slot's wrapping key is derived by
+ * the caller and its derivation parameters travel in `props` (keyformat,
+ * keylocation, pbkdf2salt, pbkdf2iters). A `slot` of 0 allocates the lowest
+ * free slot; the number that was used comes back in *slot_out.
+ */
+int
+lzc_keyslot_add(const char *fsname, uint64_t slot, nvlist_t *props,
+    uint8_t *wkeydata, uint_t wkeylen, uint64_t *slot_out)
+{
+	int error;
+	nvlist_t *ioc_args, *hidden_args, *outnvl = NULL;
+
+	if (wkeydata == NULL || slot_out == NULL)
+		return (EINVAL);
+
+	ioc_args = fnvlist_alloc();
+	if (slot != 0)
+		fnvlist_add_uint64(ioc_args, "slot", slot);
+	if (props != NULL)
+		fnvlist_add_nvlist(ioc_args, "props", props);
+
+	hidden_args = fnvlist_alloc();
+	fnvlist_add_uint8_array(hidden_args, "wkeydata", wkeydata, wkeylen);
+	fnvlist_add_nvlist(ioc_args, ZPOOL_HIDDEN_ARGS, hidden_args);
+
+	error = lzc_ioctl(ZFS_IOC_KEYSLOT_ADD, fsname, ioc_args, &outnvl);
+
+	nvlist_free(hidden_args);
+	nvlist_free(ioc_args);
+
+	/*
+	 * The kernel reports the slot it used. lzc_ioctl() sizes the result
+	 * buffer at 128 KiB and grows it on ENOMEM, so this entry cannot be
+	 * trimmed away; a missing one means the two sides disagree about the
+	 * contract, which must not be reported as a plain success.
+	 */
+	if (error == 0 && (outnvl == NULL ||
+	    nvlist_lookup_uint64(outnvl, "slot", slot_out) != 0))
+		error = EINVAL;
+
+	nvlist_free(outnvl);
+
+	return (error);
+}
+
+/*
+ * Remove a key slot from an encryption root. The slot's keylocation_<n>
+ * property is deleted by the same transaction.
+ */
+int
+lzc_keyslot_remove(const char *fsname, uint64_t slot)
+{
+	nvlist_t *ioc_args = fnvlist_alloc();
+	int error;
+
+	fnvlist_add_uint64(ioc_args, "slot", slot);
+
+	error = lzc_ioctl(ZFS_IOC_KEYSLOT_REMOVE, fsname, ioc_args, NULL);
+	nvlist_free(ioc_args);
+
+	return (error);
+}
+
 int
 lzc_reopen(const char *pool_name, boolean_t scrub_restart)
 {

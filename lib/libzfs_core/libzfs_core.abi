@@ -97,6 +97,8 @@
     <elf-symbol name='lzc_hold' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_initialize' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_ioctl_fd' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
+    <elf-symbol name='lzc_keyslot_add' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
+    <elf-symbol name='lzc_keyslot_remove' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_load_key' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_load_key_slot' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_pool_checkpoint' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
@@ -4052,6 +4054,20 @@
       <parameter type-id='5ce45b60' name='props'/>
       <parameter type-id='ae3e8ca6' name='wkeydata'/>
       <parameter type-id='3502e3ff' name='wkeylen'/>
+      <return type-id='95e97e5e'/>
+    </function-decl>
+    <function-decl name='lzc_keyslot_add' mangled-name='lzc_keyslot_add' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='lzc_keyslot_add'>
+      <parameter type-id='80f4b756' name='fsname'/>
+      <parameter type-id='9c313c2d' name='slot'/>
+      <parameter type-id='5ce45b60' name='props'/>
+      <parameter type-id='ae3e8ca6' name='wkeydata'/>
+      <parameter type-id='3502e3ff' name='wkeylen'/>
+      <parameter type-id='5d6479ae' name='slot_out'/>
+      <return type-id='95e97e5e'/>
+    </function-decl>
+    <function-decl name='lzc_keyslot_remove' mangled-name='lzc_keyslot_remove' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='lzc_keyslot_remove'>
+      <parameter type-id='80f4b756' name='fsname'/>
+      <parameter type-id='9c313c2d' name='slot'/>
       <return type-id='95e97e5e'/>
     </function-decl>
     <function-decl name='lzc_reopen' mangled-name='lzc_reopen' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='lzc_reopen'>
