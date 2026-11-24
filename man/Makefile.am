@@ -42,6 +42,7 @@ dist_man_MANS = \
 	%D%/man8/zfs-groupspace.8 \
 	%D%/man8/zfs-hold.8 \
 	%D%/man8/zfs-inherit.8 \
+	%D%/man8/zfs-keyslot.8 \
 	%D%/man8/zfs-list.8 \
 	%D%/man8/zfs-load-key.8 \
 	%D%/man8/zfs-mount.8 \

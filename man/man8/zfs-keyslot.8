@@ -1,0 +1,249 @@
+.\" SPDX-License-Identifier: CDDL-1.0
+.\"
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
+.\"
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" https://opensource.org/license/CDDL-1.0.
+.\"
+.\" Copyright (c) 2026 Umer Saleem
+.\"
+.Dd November 24, 2026
+.Dt ZFS-KEYSLOT 8
+.Os
+.
+.Sh NAME
+.Nm zfs-keyslot
+.Nd add, change, remove, or list the key slots of an encrypted dataset
+.Sh SYNOPSIS
+.Nm zfs
+.Cm keyslot
+.Cm add
+.Op Fl S Ar slot
+.Op Fl o Ar keyformat Ns = Ns Ar value
+.Op Fl o Ar keylocation Ns = Ns Ar value
+.Op Fl o Ar pbkdf2iters Ns = Ns Ar value
+.Ar filesystem Ns | Ns Ar volume
+.Nm zfs
+.Cm keyslot
+.Cm set
+.Fl S Ar slot
+.Fl o Ar keylocation Ns = Ns Ar value
+.Ar filesystem Ns | Ns Ar volume
+.Nm zfs
+.Cm keyslot
+.Cm remove
+.Fl S Ar slot
+.Ar filesystem Ns | Ns Ar volume
+.Nm zfs
+.Cm keyslot
+.Cm list
+.Op Fl Hjp
+.Ar filesystem Ns | Ns Ar volume
+.
+.Sh DESCRIPTION
+An encrypted dataset is encrypted with a master key, and that master key is
+stored wrapped by the wrapping key of its encryption root.
+The wrapping key is derived from the key the user supplies, so a key slot holds
+one wrapping of the encryption root's wrapping key.
+Any slot can unlock the same dataset, while each slot has its own key material,
+key format, and source, which allows one dataset to be unlocked with several
+independent keys.
+.Pp
+Slot 1 is the primary slot.
+It always exists, is created by
+.Nm zfs Cm create ,
+and is the wrapping that
+.Nm zfs Cm change-key
+replaces.
+.Nm zfs Cm load-key
+reads slot 1 unless
+.Fl S
+selects another slot.
+Slots 2 and above are added with
+.Nm zfs Cm keyslot
+and require the
+.Sy keyslots
+pool feature
+.Pq see Xr zpool-features 7 .
+Adding a slot does not change the dataset's keys or re-encrypt any data; it adds
+another wrapping of the same wrapping key.
+.Pp
+Slots belong to the encryption root, so every verb takes the encryption root as
+its target; naming a dataset below it is refused with a message naming the root.
+Every verb also fails on a dataset that is not encrypted.
+Adding or removing a slot requires the root's key to be loaded, so
+.Sy keystatus
+must be
+.Sy available .
+Changing a slot's source and listing slots read only metadata and work on a
+locked root.
+.Bl -tag -width ""
+.It Xo
+.Nm zfs
+.Cm keyslot
+.Cm add
+.Op Fl S Ar slot
+.Op Fl o Ar keyformat Ns = Ns Ar value
+.Op Fl o Ar keylocation Ns = Ns Ar value
+.Op Fl o Ar pbkdf2iters Ns = Ns Ar value
+.Ar filesystem Ns | Ns Ar volume
+.Xc
+Adds a key slot to the encryption root, wrapping its wrapping key under the new
+slot's key.
+The key is read or prompted for exactly as
+.Nm zfs Cm create
+does for a new dataset, and the slot's key format, salt, and iteration count are
+recorded with the slot.
+The number of the new slot is printed.
+Slot 1 is the primary slot and cannot be created; when
+.Fl S
+is omitted, the lowest free slot is allocated.
+.Bl -tag -width "-S"
+.It Fl S Ar slot
+Use the given slot number instead of allocating the lowest free one.
+The value must be 2 or greater and the slot must be free.
+.It Fl o Ar keyformat Ns = Ns Ar value
+The format of the new slot's key: one of
+.Sy raw ,
+.Sy hex ,
+or
+.Sy passphrase .
+This property is required; see
+.Xr zfsprops 7 .
+.It Fl o Ar keylocation Ns = Ns Ar value
+The source used when this slot is loaded.
+The default is
+.Sy prompt .
+A value of
+.Sy none
+is refused for encrypted datasets.
+The location is stored in the
+.Sy keylocation_ Ns Ar slot
+property.
+.It Fl o Ar pbkdf2iters Ns = Ns Ar value
+The number of PBKDF2 iterations used to derive a
+.Sy passphrase
+slot's key; see
+.Xr zfsprops 7 .
+.El
+.Pp
+The command fails if the
+.Sy keyslots
+feature is not enabled, if the key is not loaded, or if the requested slot is
+already in use.
+.It Xo
+.Nm zfs
+.Cm keyslot
+.Cm set
+.Fl S Ar slot
+.Fl o Ar keylocation Ns = Ns Ar value
+.Ar filesystem Ns | Ns Ar volume
+.Xc
+Changes the stored source of an existing slot in place.
+Nothing is re-wrapped: the slot keeps its key material, and only the location it
+is loaded from changes.
+Slot 1 edits the
+.Sy keylocation
+property; any other slot edits
+.Sy keylocation_ Ns Ar slot .
+The slot must exist.
+.Bl -tag -width "-S"
+.It Fl S Ar slot
+The slot to edit.
+This option is required.
+.It Fl o Ar keylocation Ns = Ns Ar value
+The new source.
+This option is required and is the only property accepted, because a slot's key
+format and iteration count are fixed when the slot is created.
+.El
+.Pp
+The edit is authorized by the
+.Sy keylocation
+permission, not by
+.Sy keyslot .
+.It Xo
+.Nm zfs
+.Cm keyslot
+.Cm remove
+.Fl S Ar slot
+.Ar filesystem Ns | Ns Ar volume
+.Xc
+Removes a key slot.
+The slot's key material is deleted and the location stored for it is cleared in
+the same transaction, so the slot can no longer unlock the dataset.
+On a dataset that received the location from a stream, the received value is not
+deleted, but the slot is gone and the value has no effect.
+Slot 1 cannot be removed, and slot 0 is not a slot.
+The key must be loaded, so a recovery slot cannot be removed while the root is
+locked.
+.Pp
+Removal is not secure erasure: like
+.Nm zfs Cm change-key ,
+it does not overwrite the previous wrapping on disk, so that wrapping may remain
+recoverable by forensic analysis.
+See the warning in
+.Xr zfs-load-key 8
+for what to do when a key is compromised.
+.It Xo
+.Nm zfs
+.Cm keyslot
+.Cm list
+.Op Fl Hjp
+.Ar filesystem Ns | Ns Ar volume
+.Xc
+Prints one row per slot, slot 1 included, sorted by slot number: the slot
+number, key format, PBKDF2 salt, PBKDF2 iteration count, and the stored
+location.
+A slot with no stored location is shown with a dash.
+Only metadata is read, so the command works on a locked root and never prints
+key material.
+.Bl -tag -width "-H"
+.It Fl H
+Do not print a header line.
+.It Fl j
+Print the rows as JSON, as a
+.Sy keyslots
+object keyed by slot number.
+.It Fl p
+Print numeric values; the key format is then printed as the numeric value of the
+.Sy keyformat
+property.
+.El
+.El
+.Ss Delegation
+.Nm zfs Cm keyslot Cm add
+and
+.Nm zfs Cm keyslot Cm remove
+require the
+.Sy keyslot
+permission, which must be granted on the encryption root.
+.Nm zfs Cm keyslot Cm set
+requires the
+.Sy keylocation
+permission, and
+.Nm zfs Cm keyslot Cm list
+is not gated, because it prints only metadata that is already readable through
+.Xr zfsprops 7 .
+See
+.Xr zfs-allow 8 .
+.Pp
+A user granted
+.Sy keyslot
+can add a slot using key material of their own choosing while the root is
+unlocked, and revoking the permission does not remove that slot; it has to be
+listed, and removed, explicitly.
+Grant
+.Sy keyslot
+with the same care as
+.Sy load-key .
+.
+.Sh SEE ALSO
+.Xr zfsprops 7 ,
+.Xr zpool-features 7 ,
+.Xr zfs-allow 8 ,
+.Xr zfs-create 8 ,
+.Xr zfs-load-key 8
