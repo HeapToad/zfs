@@ -416,7 +416,7 @@ get_usage(zfs_help_t idx)
 		    "\tkeyslot set -S <slot> -o keylocation=<value>\n"
 		    "\t    <filesystem|volume>\n"
 		    "\tkeyslot remove -S <slot> <filesystem|volume>\n"
-		    "\tkeyslot list [-Hp] <filesystem|volume>\n");
+		    "\tkeyslot list [-Hjp] <filesystem|volume>\n");
 	case HELP_VERSION:
 		return ("\tversion [-j]\n");
 	case HELP_REDACT:
@@ -8989,22 +8989,73 @@ keyslot_location(zfs_handle_t *zhp, uint64_t slot)
 }
 
 /*
+ * Emit one key slot row, either as a line of the text table or as an entry in
+ * the "keyslots" JSON object. Nothing sealed is ever emitted: only the slot
+ * number, keyformat, the public salt and iteration count, and the source.
+ */
+static void
+keyslot_emit_row(nvlist_t *json, uint64_t slot, uint64_t keyformat,
+    uint64_t salt, uint64_t iters, const char *location, boolean_t parsable)
+{
+	char kfbuf[32];
+	char num[32];
+
+	if (json != NULL) {
+		nvlist_t *item = fnvlist_alloc();
+
+		fnvlist_add_uint64(item, "slot", slot);
+		if (parsable)
+			fnvlist_add_uint64(item, "keyformat", keyformat);
+		else
+			fnvlist_add_string(item, "keyformat",
+			    keyslot_keyformat(keyformat, kfbuf,
+			    sizeof (kfbuf), B_FALSE));
+		fnvlist_add_uint64(item, "pbkdf2salt", salt);
+		fnvlist_add_uint64(item, "pbkdf2iters", iters);
+		fnvlist_add_string(item, "keylocation", location);
+
+		(void) snprintf(num, sizeof (num), "%llu",
+		    (u_longlong_t)slot);
+		fnvlist_add_nvlist(json, num, item);
+		fnvlist_free(item);
+		return;
+	}
+
+	(void) printf("%-5llu %-11s %-20llu %-20llu %s\n",
+	    (u_longlong_t)slot,
+	    keyslot_keyformat(keyformat, kfbuf, sizeof (kfbuf), parsable),
+	    (u_longlong_t)salt, (u_longlong_t)iters, location);
+}
+
+/*
  * Print one row per key slot of an encryption root, slot 1 included, sorted by
  * slot number. Parameters come from the stats channel and sources from the
  * property layer (design P5 §1, §10); the channel carries no sealed material,
- * so no key or wrapped key is ever printed.
+ * so no key or wrapped key is ever printed. With -j the rows are emitted as a
+ * "keyslots" JSON object instead of the text table.
  */
 static int
-zfs_do_keyslot_list(zfs_handle_t *zhp, boolean_t scripted, boolean_t parsable)
+zfs_do_keyslot_list(zfs_handle_t *zhp, boolean_t scripted, boolean_t parsable,
+    boolean_t json)
 {
 	int ret;
 	char encroot[MAXNAMELEN];
-	char kfbuf[32];
 	char prop_keylocation[MAXNAMELEN];
 	boolean_t is_encroot;
 	nvlist_t *slots = NULL, *slotnvl;
+	nvlist_t *jsobj = NULL, *jslots = NULL;
 	nvpair_t *elem;
 	uint64_t *nums = NULL, n = 0, i;
+
+	if (json) {
+		nvlist_t *data;
+
+		jsobj = zfs_json_schema(0, 1);
+		data = fnvlist_alloc();
+		fnvlist_add_nvlist(jsobj, "keyslots", data);
+		fnvlist_free(data);
+		jslots = fnvlist_lookup_nvlist(jsobj, "keyslots");
+	}
 
 	if (zfs_prop_get_int(zhp, ZFS_PROP_ENCRYPTION) == ZIO_CRYPT_OFF) {
 		(void) fprintf(stderr, "'%s' is not encrypted.\n",
@@ -9056,7 +9107,7 @@ zfs_do_keyslot_list(zfs_handle_t *zhp, boolean_t scripted, boolean_t parsable)
 		n = k;
 	}
 
-	if (!scripted)
+	if (!scripted && !json)
 		(void) printf("%-5s %-11s %-20s %-20s %s\n", "SLOT",
 		    "KEYFORMAT", "PBKDF2SALT", "PBKDF2ITERS", "KEYLOCATION");
 
@@ -9067,12 +9118,11 @@ zfs_do_keyslot_list(zfs_handle_t *zhp, boolean_t scripted, boolean_t parsable)
 		(void) strlcpy(prop_keylocation, "-",
 		    sizeof (prop_keylocation));
 
-	(void) printf("%-5d %-11s %-20llu %-20llu %s\n", 1,
-	    keyslot_keyformat(zfs_prop_get_int(zhp, ZFS_PROP_KEYFORMAT),
-	    kfbuf, sizeof (kfbuf), parsable),
-	    (u_longlong_t)zfs_prop_get_int(zhp, ZFS_PROP_PBKDF2_SALT),
-	    (u_longlong_t)zfs_prop_get_int(zhp, ZFS_PROP_PBKDF2_ITERS),
-	    prop_keylocation);
+	keyslot_emit_row(jslots, 1,
+	    zfs_prop_get_int(zhp, ZFS_PROP_KEYFORMAT),
+	    zfs_prop_get_int(zhp, ZFS_PROP_PBKDF2_SALT),
+	    zfs_prop_get_int(zhp, ZFS_PROP_PBKDF2_ITERS),
+	    prop_keylocation, parsable);
 
 	for (i = 0; i < n; i++) {
 		char name[32];
@@ -9087,15 +9137,15 @@ zfs_do_keyslot_list(zfs_handle_t *zhp, boolean_t scripted, boolean_t parsable)
 		(void) nvlist_lookup_uint64(slotnvl, "pbkdf2salt", &salt);
 		(void) nvlist_lookup_uint64(slotnvl, "pbkdf2iters", &iters);
 
-		(void) printf("%-5llu %-11s %-20llu %-20llu %s\n",
-		    (u_longlong_t)nums[i],
-		    keyslot_keyformat(keyformat, kfbuf, sizeof (kfbuf),
-		    parsable), (u_longlong_t)salt, (u_longlong_t)iters,
-		    keyslot_location(zhp, nums[i]));
+		keyslot_emit_row(jslots, nums[i], keyformat, salt, iters,
+		    keyslot_location(zhp, nums[i]), parsable);
 	}
 
 	free(nums);
 	nvlist_free(slots);
+
+	if (json)
+		zcmd_print_json(jsobj);
 
 	return (0);
 }
@@ -9201,7 +9251,7 @@ zfs_do_keyslot(int argc, char **argv)
 	int c, ret;
 	const char *verb;
 	uint64_t slot = 0, slot_out = 0;
-	boolean_t scripted = B_FALSE, parsable = B_FALSE;
+	boolean_t scripted = B_FALSE, parsable = B_FALSE, json = B_FALSE;
 	nvlist_t *props = NULL;
 	zfs_handle_t *zhp;
 
@@ -9267,13 +9317,16 @@ zfs_do_keyslot(int argc, char **argv)
 			usage(B_FALSE);
 		}
 	} else {
-		while ((c = getopt(argc, argv, "Hp")) != -1) {
+		while ((c = getopt(argc, argv, "Hjp")) != -1) {
 			switch (c) {
 			case 'H':
 				scripted = B_TRUE;
 				break;
 			case 'p':
 				parsable = B_TRUE;
+				break;
+			case 'j':
+				json = B_TRUE;
 				break;
 			default:
 				(void) fprintf(stderr,
@@ -9310,7 +9363,7 @@ zfs_do_keyslot(int argc, char **argv)
 	} else if (strcmp(verb, "remove") == 0) {
 		ret = zfs_crypto_remove_keyslot(zhp, slot);
 	} else {
-		ret = zfs_do_keyslot_list(zhp, scripted, parsable);
+		ret = zfs_do_keyslot_list(zhp, scripted, parsable, json);
 	}
 
 	nvlist_free(props);
