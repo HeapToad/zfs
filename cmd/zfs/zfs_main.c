@@ -5355,6 +5355,7 @@ zfs_do_receive(int argc, char **argv)
 #define	ZFS_DELEG_PERM_BOOKMARK		"bookmark"
 #define	ZFS_DELEG_PERM_LOAD_KEY		"load-key"
 #define	ZFS_DELEG_PERM_CHANGE_KEY	"change-key"
+#define	ZFS_DELEG_PERM_KEYSLOT		"keyslot"
 
 #define	ZFS_DELEG_PERM_PROJECTUSED	"projectused"
 #define	ZFS_DELEG_PERM_PROJECTQUOTA	"projectquota"
@@ -5385,6 +5386,7 @@ static zfs_deleg_perm_tab_t zfs_deleg_perm_tbl[] = {
 	{ ZFS_DELEG_PERM_BOOKMARK, ZFS_DELEG_NOTE_BOOKMARK },
 	{ ZFS_DELEG_PERM_LOAD_KEY, ZFS_DELEG_NOTE_LOAD_KEY },
 	{ ZFS_DELEG_PERM_CHANGE_KEY, ZFS_DELEG_NOTE_CHANGE_KEY },
+	{ ZFS_DELEG_PERM_KEYSLOT, ZFS_DELEG_NOTE_KEYSLOT },
 
 	{ ZFS_DELEG_PERM_GROUPQUOTA, ZFS_DELEG_NOTE_GROUPQUOTA },
 	{ ZFS_DELEG_PERM_GROUPUSED, ZFS_DELEG_NOTE_GROUPUSED },
@@ -5904,6 +5906,9 @@ deleg_perm_comment(zfs_deleg_note_t note)
 		break;
 	case ZFS_DELEG_NOTE_CHANGE_KEY:
 		str = "Allows changing or adding an encryption key";
+		break;
+	case ZFS_DELEG_NOTE_KEYSLOT:
+		str = "Allows adding and removing encryption key slots";
 		break;
 /*
  *	case ZFS_DELEG_NOTE_VSCAN:

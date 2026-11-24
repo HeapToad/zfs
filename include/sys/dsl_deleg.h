@@ -57,6 +57,7 @@ extern "C" {
 #define	ZFS_DELEG_PERM_BOOKMARK		"bookmark"
 #define	ZFS_DELEG_PERM_LOAD_KEY		"load-key"
 #define	ZFS_DELEG_PERM_CHANGE_KEY	"change-key"
+#define	ZFS_DELEG_PERM_KEYSLOT		"keyslot"
 #define	ZFS_DELEG_PERM_PROJECTUSED	"projectused"
 #define	ZFS_DELEG_PERM_PROJECTQUOTA	"projectquota"
 #define	ZFS_DELEG_PERM_PROJECTOBJUSED	"projectobjused"
