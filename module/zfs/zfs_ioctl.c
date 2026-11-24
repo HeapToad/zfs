@@ -8024,6 +8024,40 @@ out:
 	return (ret);
 }
 
+/*
+ * Remove a key slot from an encryption root. Its location property goes in the
+ * same transaction, so a location never outlives its slot. No key material
+ * crosses this ioctl.
+ *
+ * innvl: {
+ *     "slot" -> uint64
+ *         slot to remove; slot 1 is the primary slot and cannot be removed
+ * }
+ *
+ * outnvl is unused
+ */
+static const zfs_ioc_key_t zfs_keys_keyslot_remove[] = {
+	{"slot",		DATA_TYPE_UINT64,	0},
+};
+
+static int
+zfs_ioc_keyslot_remove(const char *dsname, nvlist_t *innvl, nvlist_t *outnvl)
+{
+	uint64_t slot = 0;
+	dsl_crypto_key_slot_args_t args = { 0 };
+
+	(void) outnvl;
+
+	if (strchr(dsname, '@') != NULL || strchr(dsname, '%') != NULL)
+		return (SET_ERROR(EINVAL));
+
+	(void) nvlist_lookup_uint64(innvl, "slot", &slot);
+
+	args.dcks_slot = slot;
+
+	return (spa_keystore_keyslot_remove(dsname, &args));
+}
+
 static zfs_ioc_vec_t zfs_ioc_vec[ZFS_IOC_LAST - ZFS_IOC_FIRST] = { 0 };
 
 static void
@@ -8242,6 +8276,11 @@ zfs_ioctl_init(void)
 	    DATASET_NAME, POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY,
 	    B_TRUE, B_TRUE, zfs_keys_keyslot_add,
 	    ARRAY_SIZE(zfs_keys_keyslot_add));
+	zfs_ioctl_register("keyslot-remove", ZFS_IOC_KEYSLOT_REMOVE,
+	    zfs_ioc_keyslot_remove, zfs_secpolicy_keyslot,
+	    DATASET_NAME, POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY,
+	    B_TRUE, B_TRUE, zfs_keys_keyslot_remove,
+	    ARRAY_SIZE(zfs_keys_keyslot_remove));
 
 	zfs_ioctl_register("sync", ZFS_IOC_POOL_SYNC,
 	    zfs_ioc_pool_sync, zfs_secpolicy_none, POOL_NAME,

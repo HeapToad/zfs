@@ -967,56 +967,78 @@ dsl_crypto_key_slot_add_sync(dsl_dataset_t *ds,
 	}
 }
 
-typedef struct spa_keystore_keyslot_add_args {
-	const char *skkaa_dsname;
-	dsl_crypto_key_slot_args_t *skkaa_args;
-} spa_keystore_keyslot_add_args_t;
+typedef struct spa_keystore_keyslot_args {
+	const char *skka_dsname;
+	dsl_crypto_key_slot_args_t *skka_args;
+	int (*skka_check)(dsl_dataset_t *, dsl_crypto_key_slot_args_t *);
+	void (*skka_sync)(dsl_dataset_t *, dsl_crypto_key_slot_args_t *,
+	    dmu_tx_t *);
+} spa_keystore_keyslot_args_t;
 
 static int
-spa_keystore_keyslot_add_check(void *arg, dmu_tx_t *tx)
+spa_keystore_keyslot_check(void *arg, dmu_tx_t *tx)
 {
-	spa_keystore_keyslot_add_args_t *skkaa = arg;
+	spa_keystore_keyslot_args_t *skka = arg;
 	dsl_pool_t *dp = dmu_tx_pool(tx);
 	dsl_dataset_t *ds;
 	int ret;
 
-	ret = dsl_dataset_hold(dp, skkaa->skkaa_dsname, FTAG, &ds);
+	ret = dsl_dataset_hold(dp, skka->skka_dsname, FTAG, &ds);
 	if (ret != 0)
 		return (ret);
 
-	ret = dsl_crypto_key_slot_add_check(ds, skkaa->skkaa_args);
+	ret = skka->skka_check(ds, skka->skka_args);
 	dsl_dataset_rele(ds, FTAG);
 
 	return (ret);
 }
 
 static void
-spa_keystore_keyslot_add_sync(void *arg, dmu_tx_t *tx)
+spa_keystore_keyslot_sync(void *arg, dmu_tx_t *tx)
 {
-	spa_keystore_keyslot_add_args_t *skkaa = arg;
+	spa_keystore_keyslot_args_t *skka = arg;
 	dsl_pool_t *dp = dmu_tx_pool(tx);
 	dsl_dataset_t *ds;
 
-	VERIFY0(dsl_dataset_hold(dp, skkaa->skkaa_dsname, FTAG, &ds));
-	dsl_crypto_key_slot_add_sync(ds, skkaa->skkaa_args, tx);
+	VERIFY0(dsl_dataset_hold(dp, skka->skka_dsname, FTAG, &ds));
+	skka->skka_sync(ds, skka->skka_args, tx);
 	dsl_dataset_rele(ds, FTAG);
 }
 
 /*
- * Add a key slot to an encryption root. Every failure condition lives in the
- * check pass, so the sync pass cannot fail.
+ * Run a key slot operation in syncing context. Every failure condition lives in
+ * the check pass, so the sync pass cannot fail.
  */
+static int
+spa_keystore_keyslot_task(const char *dsname,
+    dsl_crypto_key_slot_args_t *args,
+    int (*check)(dsl_dataset_t *, dsl_crypto_key_slot_args_t *),
+    void (*sync)(dsl_dataset_t *, dsl_crypto_key_slot_args_t *, dmu_tx_t *))
+{
+	spa_keystore_keyslot_args_t skka;
+
+	skka.skka_dsname = dsname;
+	skka.skka_args = args;
+	skka.skka_check = check;
+	skka.skka_sync = sync;
+
+	return (dsl_sync_task(dsname, spa_keystore_keyslot_check,
+	    spa_keystore_keyslot_sync, &skka, 15, ZFS_SPACE_CHECK_RESERVED));
+}
+
 int
 spa_keystore_keyslot_add(const char *dsname, dsl_crypto_key_slot_args_t *args)
 {
-	spa_keystore_keyslot_add_args_t skkaa;
+	return (spa_keystore_keyslot_task(dsname, args,
+	    dsl_crypto_key_slot_add_check, dsl_crypto_key_slot_add_sync));
+}
 
-	skkaa.skkaa_dsname = dsname;
-	skkaa.skkaa_args = args;
-
-	return (dsl_sync_task(dsname, spa_keystore_keyslot_add_check,
-	    spa_keystore_keyslot_add_sync, &skkaa, 15,
-	    ZFS_SPACE_CHECK_RESERVED));
+int
+spa_keystore_keyslot_remove(const char *dsname,
+    dsl_crypto_key_slot_args_t *args)
+{
+	return (spa_keystore_keyslot_task(dsname, args,
+	    dsl_crypto_key_slot_remove_check, dsl_crypto_key_slot_remove_sync));
 }
 
 /*
@@ -1227,12 +1249,22 @@ dsl_crypto_key_slot_remove_sync(dsl_dataset_t *ds,
 	objset_t *mos = ds->ds_dir->dd_pool->dp_meta_objset;
 	uint64_t dckobj = args->dcks_dckobj;
 	uint64_t slot = args->dcks_slot;
+	char name[DSL_CRYPTO_KEY_SLOT_NAME_MAX];
 
 	ASSERT(dmu_tx_is_syncing(tx));
 	ASSERT3U(slot, >=, 2);
 	ASSERT3U(args->dcks_dckobj, !=, 0);
 
 	dsl_crypto_key_slot_delete(mos, dckobj, slot, tx);
+
+	/*
+	 * The slot's source is a property, and a location must not outlive its
+	 * slot, so it goes in the same transaction. ZPROP_SRC_NONE tolerates a
+	 * missing entry: a slot may have been created without a location.
+	 */
+	(void) snprintf(name, sizeof (name), "keylocation_%llu",
+	    (u_longlong_t)slot);
+	dsl_prop_set_sync_impl(ds, name, ZPROP_SRC_NONE, 0, 0, NULL, tx);
 }
 
 static int
