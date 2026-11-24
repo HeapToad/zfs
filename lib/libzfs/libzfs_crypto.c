@@ -811,7 +811,7 @@ error:
 }
 
 static boolean_t
-encryption_feature_is_enabled(zpool_handle_t *zph)
+feature_is_enabled(zpool_handle_t *zph, spa_feature_t feat)
 {
 	nvlist_t *features;
 	uint64_t feat_refcount;
@@ -821,14 +821,18 @@ encryption_feature_is_enabled(zpool_handle_t *zph)
 	    < SPA_VERSION_FEATURES)
 		return (B_FALSE);
 
-	/* check for crypto feature */
 	features = zpool_get_features(zph);
 	if (!features || nvlist_lookup_uint64(features,
-	    spa_feature_table[SPA_FEATURE_ENCRYPTION].fi_guid,
-	    &feat_refcount) != 0)
+	    spa_feature_table[feat].fi_guid, &feat_refcount) != 0)
 		return (B_FALSE);
 
 	return (B_TRUE);
+}
+
+static boolean_t
+encryption_feature_is_enabled(zpool_handle_t *zph)
+{
+	return (feature_is_enabled(zph, SPA_FEATURE_ENCRYPTION));
 }
 
 static int
@@ -1543,6 +1547,217 @@ error:
 	attempts++;
 	if (can_retry && correctible && attempts < MAX_KEY_PROMPT_ATTEMPTS)
 		goto try_again;
+
+	return (ret);
+}
+
+/*
+ * Convert the raw `-o` nvlist the CLI builds into the typed property nvlist
+ * the create path uses. Only the three derivation properties are accepted, as
+ * for change-key, and zfs_valid_proplist() converts and validates the values,
+ * so a slot's parameters are checked exactly the way zfs create's are.
+ */
+static int
+zfs_crypto_verify_keyslot_nvlist(zfs_handle_t *zhp, nvlist_t *props,
+    nvlist_t **props_out, char *errbuf)
+{
+	nvpair_t *elem = NULL;
+	nvlist_t *new_props;
+
+	while ((elem = nvlist_next_nvpair(props, elem)) != NULL) {
+		switch (zfs_name_to_prop(nvpair_name(elem))) {
+		case ZFS_PROP_KEYFORMAT:
+		case ZFS_PROP_KEYLOCATION:
+		case ZFS_PROP_PBKDF2_ITERS:
+			break;
+		default:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "Only keyformat, keylocation and pbkdf2iters "
+			    "may be specified when adding a key slot.");
+			return (EINVAL);
+		}
+	}
+
+	new_props = zfs_valid_proplist(zhp->zfs_hdl, zhp->zfs_type, props,
+	    zfs_prop_get_int(zhp, ZFS_PROP_ZONED), zhp, zhp->zpool_hdl,
+	    B_TRUE, errbuf);
+	if (new_props == NULL)
+		return (EINVAL);
+
+	*props_out = new_props;
+	return (0);
+}
+
+/*
+ * Add a key slot to an encryption root. `props` carries the slot's derivation
+ * parameters as the CLI's raw `-o` values (keyformat, and optionally
+ * keylocation and pbkdf2iters), which are converted and validated here exactly
+ * as change-key's are. The secret is obtained and derived by the same helpers
+ * zfs create uses, so a slot is created exactly the way a dataset's first key
+ * is. On success *slot_out holds the slot that was used.
+ */
+int
+zfs_crypto_add_keyslot(zfs_handle_t *zhp, uint64_t slot, nvlist_t *props,
+    uint64_t *slot_out)
+{
+	int ret;
+	char errbuf[ERRBUFLEN];
+	char prop_encroot[MAXNAMELEN];
+	nvlist_t *typed_props = NULL;
+	uint64_t keyformat = ZFS_KEYFORMAT_NONE;
+	const char *keylocation = NULL;
+	uint8_t *key_data = NULL;
+	uint_t key_datalen = 0;
+	boolean_t is_encroot;
+
+	(void) snprintf(errbuf, sizeof (errbuf),
+	    "Key slot add error");
+
+	/* slot 1 is the compatibility floor; a new slot starts at 2 */
+	if (slot == DSL_CRYPTO_KEY_SLOT_PRIMARY) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "slot 1 is the primary slot; new slots start at 2");
+		ret = EINVAL;
+		goto error;
+	}
+
+	if (props == NULL) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "A keyformat is required to add a key slot.");
+		ret = EINVAL;
+		goto error;
+	}
+
+	if (zfs_prop_get_int(zhp, ZFS_PROP_ENCRYPTION) == ZIO_CRYPT_OFF) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "'%s' is not encrypted.", zfs_get_name(zhp));
+		ret = EINVAL;
+		goto error;
+	}
+
+	/*
+	 * Take the raw properties and convert them the way the create path
+	 * does, so the values are validated in one place rather than in each
+	 * caller. The dataset handle is passed so that checks which depend on
+	 * the target (such as keylocation='none' on an encrypted dataset)
+	 * report the same messages zfs set does.
+	 */
+	ret = zfs_crypto_verify_keyslot_nvlist(zhp, props, &typed_props,
+	    errbuf);
+	if (ret != 0)
+		goto error;
+	props = typed_props;
+
+	/* a keyformat is required: it says how the key is derived */
+	ret = nvlist_lookup_uint64(props,
+	    zfs_prop_to_name(ZFS_PROP_KEYFORMAT), &keyformat);
+	if (ret != 0 || keyformat == ZFS_KEYFORMAT_NONE) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "A keyformat is required to add a key slot.");
+		ret = EINVAL;
+		goto error;
+	}
+
+	/* slots live on the encryption root's key object, as for load-key */
+	ret = zfs_crypto_get_encryption_root(zhp, &is_encroot, prop_encroot);
+	if (ret != 0) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "Failed to get encryption root for '%s'.",
+		    zfs_get_name(zhp));
+		goto error;
+	} else if (!is_encroot) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "Key slots must be added to the encryption root of '%s' "
+		    "(%s).", zfs_get_name(zhp), prop_encroot);
+		ret = EINVAL;
+		goto error;
+	}
+
+	/* check the feature and the loaded key before asking for a secret */
+	if (!feature_is_enabled(zhp->zpool_hdl, SPA_FEATURE_KEYSLOTS)) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "pool does not have the keyslots feature enabled");
+		ret = ENOTSUP;
+		goto error;
+	}
+
+	if (zfs_prop_get_int(zhp, ZFS_PROP_KEYSTATUS) !=
+	    ZFS_KEYSTATUS_AVAILABLE) {
+		zfs_error_aux(zhp->zfs_hdl, "key must be loaded to add a slot");
+		ret = EACCES;
+		goto error;
+	}
+
+	/* default to prompt if no keylocation is specified, as create does */
+	(void) nvlist_lookup_string(props,
+	    zfs_prop_to_name(ZFS_PROP_KEYLOCATION), &keylocation);
+	if (keylocation == NULL) {
+		keylocation = (char *)"prompt";
+		ret = nvlist_add_string(props,
+		    zfs_prop_to_name(ZFS_PROP_KEYLOCATION), keylocation);
+		if (ret != 0)
+			goto error;
+	}
+
+	/*
+	 * Get the secret and derive the slot's wrapping key through the create
+	 * path: it prompts or reads the location, checks the key's length,
+	 * generates the passphrase salt, defaults the iteration count, and adds
+	 * the parameters the kernel records for the slot.
+	 */
+	ret = populate_create_encryption_params_nvlists(zhp->zfs_hdl, zhp,
+	    B_TRUE, keyformat, keylocation, props, &key_data, &key_datalen);
+	if (ret != 0)
+		goto error;
+
+	ret = lzc_keyslot_add(zhp->zfs_name, slot, props, key_data,
+	    key_datalen, slot_out);
+	if (ret != 0) {
+		switch (ret) {
+		case EPERM:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "Permission denied.");
+			break;
+		case EACCES:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "key must be loaded to add a slot");
+			break;
+		case EEXIST:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "key slot %llu is already in use",
+			    (u_longlong_t)slot);
+			break;
+		case EINVAL:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "Invalid parameters provided for dataset %s.",
+			    zfs_get_name(zhp));
+			break;
+		case ENOTSUP:
+			/*
+			 * The feature is checked above, so ENOTSUP here
+			 * means the key object predates the slot format.
+			 */
+			zfs_error_aux(zhp->zfs_hdl,
+			    "'%s' was created with an encryption version that "
+			    "cannot hold key slots.", zfs_get_name(zhp));
+			break;
+		case E2BIG:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "keylocation is too long");
+			break;
+		}
+		goto error;
+	}
+
+	free(key_data);
+	nvlist_free(typed_props);
+
+	return (0);
+
+error:
+	free(key_data);
+	nvlist_free(typed_props);
+	zfs_error(zhp->zfs_hdl, EZFS_CRYPTOFAILED, errbuf);
 
 	return (ret);
 }
