@@ -413,6 +413,8 @@ get_usage(zfs_help_t idx)
 		return ("\tkeyslot add [-S <slot>] [-o keyformat=<value>]\n"
 		    "\t    [-o keylocation=<value>] [-o pbkdf2iters=<value>]\n"
 		    "\t    <filesystem|volume>\n"
+		    "\tkeyslot set -S <slot> -o keylocation=<value>\n"
+		    "\t    <filesystem|volume>\n"
 		    "\tkeyslot remove -S <slot> <filesystem|volume>\n"
 		    "\tkeyslot list [-Hp] <filesystem|volume>\n");
 	case HELP_VERSION:
@@ -9099,7 +9101,96 @@ zfs_do_keyslot_list(zfs_handle_t *zhp, boolean_t scripted, boolean_t parsable)
 }
 
 /*
- * zfs keyslot add|remove|list
+ * Edit an existing slot's source in place. Only keylocation can be set: a
+ * slot's derivation parameters are fixed when it is created, and changing the
+ * location is metadata only. The slot must exist, because a location with no
+ * slot is not a state these verbs produce; the raw `zfs set keylocation_<n>`
+ * path stays looser and still accepts an inert entry.
+ */
+static int
+zfs_do_keyslot_set(zfs_handle_t *zhp, uint64_t slot, nvlist_t *props)
+{
+	nvpair_t *elem;
+	const char *loc;
+	char encroot[MAXNAMELEN];
+	char name[40];
+	char num[32];
+	boolean_t is_encroot;
+	nvlist_t *slots = NULL, *slotnvl;
+	int ret;
+
+	elem = nvlist_next_nvpair(props, NULL);
+	if (elem == NULL) {
+		(void) fprintf(stderr, "Missing -o keylocation=<value>\n");
+		return (-1);
+	}
+	if (nvlist_next_nvpair(props, elem) != NULL ||
+	    strcmp(nvpair_name(elem),
+	    zfs_prop_to_name(ZFS_PROP_KEYLOCATION)) != 0) {
+		(void) fprintf(stderr, "only -o keylocation=<value> may be "
+		    "set with 'zfs keyslot set'\n");
+		return (-1);
+	}
+	loc = fnvpair_value_string(elem);
+
+	if (zfs_prop_get_int(zhp, ZFS_PROP_ENCRYPTION) == ZIO_CRYPT_OFF) {
+		(void) fprintf(stderr, "'%s' is not encrypted.\n",
+		    zfs_get_name(zhp));
+		return (-1);
+	}
+
+	/* the root is resolved first, so a child does not report ENOENT */
+	ret = zfs_crypto_get_encryption_root(zhp, &is_encroot, encroot);
+	if (ret != 0) {
+		(void) fprintf(stderr,
+		    "Failed to get encryption root for '%s'.\n",
+		    zfs_get_name(zhp));
+		return (-1);
+	}
+	if (!is_encroot) {
+		(void) fprintf(stderr,
+		    "Key slots must be set for the encryption root of '%s' "
+		    "(%s).\n", zfs_get_name(zhp), encroot);
+		return (-1);
+	}
+
+	/*
+	 * Slot 1 exists whenever the target is an encryption root and is not in
+	 * the channel; every other slot has to be there.
+	 */
+	(void) strlcpy(name, zfs_prop_to_name(ZFS_PROP_KEYLOCATION),
+	    sizeof (name));
+	if (slot != 1) {
+		(void) snprintf(name, sizeof (name), "keylocation_%llu",
+		    (u_longlong_t)slot);
+		(void) snprintf(num, sizeof (num), "%llu",
+		    (u_longlong_t)slot);
+
+		ret = zfs_crypto_get_keyslots(zhp, &slots);
+		if (ret != 0) {
+			(void) fprintf(stderr,
+			    "Failed to get key slots for '%s'.\n",
+			    zfs_get_name(zhp));
+			return (-1);
+		}
+		if (nvlist_lookup_nvlist(slots, num, &slotnvl) != 0) {
+			(void) fprintf(stderr, "key slot %llu does not exist\n",
+			    (u_longlong_t)slot);
+			nvlist_free(slots);
+			return (-1);
+		}
+		nvlist_free(slots);
+	}
+
+	ret = zfs_prop_set(zhp, name, loc);
+	if (ret != 0)
+		return (-1);
+
+	return (0);
+}
+
+/*
+ * zfs keyslot add|set|remove|list
  *
  * Slots are alternate wrappings of an encryption root's wrapping key, so every
  * verb targets the root itself; libzfs refuses a non-root and names the root.
@@ -9120,8 +9211,8 @@ zfs_do_keyslot(int argc, char **argv)
 	}
 
 	verb = argv[1];
-	if (strcmp(verb, "add") != 0 && strcmp(verb, "remove") != 0 &&
-	    strcmp(verb, "list") != 0) {
+	if (strcmp(verb, "add") != 0 && strcmp(verb, "set") != 0 &&
+	    strcmp(verb, "remove") != 0 && strcmp(verb, "list") != 0) {
 		(void) fprintf(stderr, "Invalid keyslot subcommand '%s'\n",
 		    verb);
 		usage(B_FALSE);
@@ -9131,7 +9222,7 @@ zfs_do_keyslot(int argc, char **argv)
 	argc--;
 	argv++;
 
-	if (strcmp(verb, "add") == 0) {
+	if (strcmp(verb, "add") == 0 || strcmp(verb, "set") == 0) {
 		props = fnvlist_alloc();
 		while ((c = getopt(argc, argv, "S:o:")) != -1) {
 			switch (c) {
@@ -9150,6 +9241,12 @@ zfs_do_keyslot(int argc, char **argv)
 				    "invalid option '%c'\n", optopt);
 				usage(B_FALSE);
 			}
+		}
+
+		/* add may allocate a slot, set edits one that already exists */
+		if (strcmp(verb, "set") == 0 && slot == 0) {
+			(void) fprintf(stderr, "Missing -S <slot>\n");
+			usage(B_FALSE);
 		}
 	} else if (strcmp(verb, "remove") == 0) {
 		while ((c = getopt(argc, argv, "S:")) != -1) {
@@ -9208,6 +9305,8 @@ zfs_do_keyslot(int argc, char **argv)
 		if (ret == 0)
 			(void) printf("added key slot %llu to '%s'\n",
 			    (u_longlong_t)slot_out, zfs_get_name(zhp));
+	} else if (strcmp(verb, "set") == 0) {
+		ret = zfs_do_keyslot_set(zhp, slot, props);
 	} else if (strcmp(verb, "remove") == 0) {
 		ret = zfs_crypto_remove_keyslot(zhp, slot);
 	} else {
