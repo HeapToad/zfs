@@ -940,6 +940,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/cli_root/zfs_promote/zfs_promote_007_neg.ksh \
 	functional/cli_root/zfs_promote/zfs_promote_008_pos.ksh \
 	functional/cli_root/zfs_promote/zfs_promote_encryptionroot.ksh \
+	functional/cli_root/zfs_promote/zfs_promote_keyslots.ksh \
 	functional/cli_root/zfs_property/cleanup.ksh \
 	functional/cli_root/zfs_property/setup.ksh \
 	functional/cli_root/zfs_property/zfs_written_property_001_pos.ksh \

@@ -301,7 +301,8 @@ tags = ['functional', 'cli_root', 'zfs_program']
 [tests/functional/cli_root/zfs_promote]
 tests = ['zfs_promote_001_pos', 'zfs_promote_002_pos', 'zfs_promote_003_pos',
     'zfs_promote_004_pos', 'zfs_promote_005_pos', 'zfs_promote_006_neg',
-    'zfs_promote_007_neg', 'zfs_promote_008_pos', 'zfs_promote_encryptionroot']
+    'zfs_promote_007_neg', 'zfs_promote_008_pos', 'zfs_promote_encryptionroot',
+    'zfs_promote_keyslots']
 tags = ['functional', 'cli_root', 'zfs_promote']
 
 [tests/functional/cli_root/zfs_property]
