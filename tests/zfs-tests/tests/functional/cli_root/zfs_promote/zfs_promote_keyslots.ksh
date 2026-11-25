@@ -89,16 +89,38 @@ function slots_hash
 }
 
 #
+# Unmount every dataset in the pool except the test filesystem itself, which is
+# mounted at $TESTDIR and holds the slot key files. Children first: after a
+# promote the origin and its children are mounted members of the new root's
+# encryption tree, so unmounting the root alone leaves the tree busy and
+# unload-key fails with "'<root>' is busy". Plain parent names sort before
+# their children, so a reverse sort visits the children first.
+#
+function unmount_pool
+{
+	typeset name
+
+	for name in $(zfs list -H -o name -r $TESTPOOL | sort -r); do
+		case "$name" in
+		"$TESTPOOL"|"$TESTPOOL/$TESTFS")
+			continue
+			;;
+		esac
+		zfs unmount $name 2>/dev/null
+	done
+}
+
+#
 # Unlock the tree with the given slot. The tree is mounted before the promote
-# and stays mounted, so unmounting first is what makes the mount in the caller
-# unconditional. The key still reads as loaded unless promote left the
+# and stays mounted, so unmounting it first is what makes the mount in the
+# caller unconditional. The key still reads as loaded unless promote left the
 # keystore keyed by the old root, so unload only then.
 #
 function unlock_with_slot
 {
 	typeset ds=$1 slot=$2
 
-	zfs unmount $ds 2>/dev/null
+	unmount_pool
 	if key_available $ds; then
 		log_must zfs unload-key $ds
 	fi
@@ -189,8 +211,10 @@ log_must zfs snapshot $recroot@s1
 log_must eval "zfs send -w -p $recroot@s1 | zfs receive -u $recvroot"
 log_must test "$(zfs get -H -o source keylocation_2 $recvroot)" = "received"
 
-log_must zfs snapshot $recvroot@s1
-log_must zfs clone $recvroot@s1 $recvclone
+# The receive already created $recvroot@s1 from the stream, so the clone
+# gets its own snapshot.
+log_must zfs snapshot $recvroot@s2
+log_must zfs clone $recvroot@s2 $recvclone
 log_must zfs promote $recvclone
 log_must test "$(zfs get -H -o source keylocation_2 $recvclone)" = "local"
 log_must test "$(get_prop keylocation_2 $recvclone)" = \
