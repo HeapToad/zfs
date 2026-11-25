@@ -144,9 +144,12 @@ log_must key_unavailable $promptroot
 
 #
 # 5. A non-root child can still detach while the root holds extra slots.
+#    A detach with an explicit keylocation also needs its keyformat; the CLI
+#    refuses a new root whose keylocation is set but whose keyformat is not.
 #
 log_must zfs create $detach
-log_must zfs change-key -o keylocation=file://$TESTDIR/ckey.8 $detach
+log_must zfs change-key -o keyformat=raw -o keylocation=file://$TESTDIR/ckey.8 \
+    $detach
 log_must verify_encryption_root $detach $detach
 log_must test "$(get_prop keylocation_2 $encroot)" = \
     "file://$TESTDIR/ckey.3"
@@ -155,6 +158,13 @@ log_must test "$(get_prop keylocation_2 $encroot)" = \
 # 6. Removing the extra slot makes both forms work again, and the key that the
 #    change installed really unlocks the tree.
 #
+# Case 2 left $encroot unmounted, so mount it again: the file below has to be
+# written through the dataset, not into the bare mountpoint directory. The
+# detached child is still mounted under $encroot's mountpoint, so it is
+# unmounted first or unmounting $encroot later fails on its stale path.
+#
+log_must zfs unmount $detach
+log_must zfs mount $encroot
 log_must eval "echo test > /$TESTPOOL/$TESTFS1/enc/file"
 log_must zfs keyslot remove -S 2 $encroot
 log_must zfs change-key -o keylocation=file://$TESTDIR/ckey.9 $encroot
