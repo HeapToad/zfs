@@ -2131,6 +2131,17 @@ zfs_crypto_rewrap(zfs_handle_t *zhp, nvlist_t *raw_props, boolean_t inheritkey)
 		goto error;
 	}
 
+	/*
+	 * Refuse before anything prompts for a key: on an encryption root
+	 * that holds alternate slots the kernel would refuse anyway, but only
+	 * after the user had typed a new passphrase. The helper reports its
+	 * own error, so return directly: the error label would print a second
+	 * message.
+	 */
+	ret = zfs_crypto_change_key_slots_check(zhp);
+	if (ret != 0)
+		return (ret);
+
 	/* validate the provided properties */
 	ret = zfs_crypto_verify_rewrap_nvlist(zhp, raw_props, inheritkey,
 	    &props, errbuf);
