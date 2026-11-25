@@ -1085,7 +1085,7 @@ dsl_crypto_key_slot_read_checked(objset_t *mos, uint64_t dckobj, uint64_t slot,
  */
 int
 dsl_crypto_key_slot_unwrap(objset_t *mos, uint64_t dckobj, uint64_t slot,
-    const crypto_key_t *wkey_n, uint8_t *wkey1_out)
+    crypto_key_t *wkey_n, uint8_t *wkey1_out)
 {
 	int ret;
 	uint64_t guid, crypt;
@@ -1126,7 +1126,7 @@ dsl_crypto_key_slot_unwrap(objset_t *mos, uint64_t dckobj, uint64_t slot,
 	if (ret != 0)
 		return (ret);
 
-	return (zio_crypt_slot_unwrap(crypt, (crypto_key_t *)wkey_n, guid,
+	return (zio_crypt_slot_unwrap(crypt, wkey_n, guid,
 	    ZIO_CRYPT_KEY_CURRENT_VERSION, slot, cipher, iv, mac, wkey1_out));
 }
 
