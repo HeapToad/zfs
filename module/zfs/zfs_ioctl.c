@@ -8016,6 +8016,7 @@ zfs_ioc_keyslot_add(const char *dsname, nvlist_t *innvl, nvlist_t *outnvl)
 	}
 
 	args.dcks_slot = slot;
+	args.dcks_auto = (slot == 0);
 	args.dcks_keyformat = dcp->cp_wkey->wk_keyformat;
 	args.dcks_salt = dcp->cp_wkey->wk_salt;
 	args.dcks_iters = dcp->cp_wkey->wk_iters;

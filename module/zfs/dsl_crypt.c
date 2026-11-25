@@ -877,7 +877,7 @@ dsl_crypto_key_slot_add_check(dsl_dataset_t *ds,
 	}
 
 	/* resolve or allocate the slot number */
-	if (args->dcks_slot != 0) {
+	if (!args->dcks_auto) {
 		boolean_t exists;
 
 		if (args->dcks_slot < 2)
@@ -889,6 +889,13 @@ dsl_crypto_key_slot_add_check(dsl_dataset_t *ds,
 		if (exists)
 			return (SET_ERROR(EEXIST));
 	} else {
+		/*
+		 * An auto request means any free slot, not the number the
+		 * preliminary check picked. This check also runs in syncing
+		 * context, after any other task in the same txg has written
+		 * its slot, so resolve again instead of validating the old
+		 * choice.
+		 */
 		ret = dsl_crypto_key_slot_alloc(mos, dd->dd_crypto_obj,
 		    &args->dcks_slot);
 		if (ret != 0)

@@ -83,6 +83,7 @@ typedef enum dsl_crypto_key_slot_field {
 typedef struct dsl_crypto_key_slot_args {
 	/* caller input */
 	uint64_t dcks_slot;			/* 0 = lowest free slot */
+	boolean_t dcks_auto;			/* caller asked for any slot */
 	zfs_keyformat_t dcks_keyformat;
 	uint64_t dcks_salt;
 	uint64_t dcks_iters;
