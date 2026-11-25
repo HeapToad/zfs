@@ -799,6 +799,45 @@ dsl_crypto_key_slot_exists(objset_t *mos, uint64_t dckobj, uint64_t slot,
 }
 
 /*
+ * Does the key object hold any alternate slot, that is, any slot other than 1?
+ * The entry name alone is the test; the six fields are only read when a slot is
+ * actually used. The out-param starts TRUE, so a ZAP error can never be read as
+ * "no slots" by a caller that ignores the return value.
+ */
+static int
+dsl_crypto_key_slot_has_extra(objset_t *mos, uint64_t dckobj,
+    boolean_t *has_extra)
+{
+	int ret = 0;
+	zap_cursor_t *zc;
+	zap_attribute_t *za;
+
+	zc = kmem_alloc(sizeof (*zc), KM_SLEEP);
+	za = zap_attribute_alloc();
+
+	*has_extra = B_TRUE;
+
+	for (zap_cursor_init(zc, mos, dckobj);
+	    (ret = zap_cursor_retrieve(zc, za)) == 0;
+	    zap_cursor_advance(zc)) {
+		if (dsl_crypto_key_slot_wrap_parse(za->za_name) != 0)
+			break;
+	}
+
+	zap_cursor_fini(zc);
+	kmem_free(zc, sizeof (*zc));
+	zap_attribute_free(za);
+
+	/* any other error leaves the answer unknown, so fail closed */
+	if (ret != 0 && ret != ENOENT)
+		return (SET_ERROR(ret));
+
+	/* 0 means a slot was found; ENOENT means the walk completed */
+	*has_extra = (ret == 0);
+	return (0);
+}
+
+/*
  * Pick the lowest free slot number. Slot numbers are reused, so the first free
  * number is reached after at most the number of slots currently in use.
  */
@@ -2169,6 +2208,7 @@ spa_keystore_change_key_check(void *arg, dmu_tx_t *tx)
 	spa_keystore_change_key_args_t *skcka = arg;
 	dsl_crypto_params_t *dcp = skcka->skcka_cp;
 	uint64_t rddobj;
+	boolean_t has_extra;
 
 	/* we assume skcka_userprops has already been verified */
 
@@ -2210,6 +2250,23 @@ spa_keystore_change_key_check(void *arg, dmu_tx_t *tx)
 	ret = dsl_dir_get_encryption_root_ddobj(dd, &rddobj);
 	if (ret != 0)
 		goto error;
+
+	/*
+	 * Replacing wkey_1 on a root that holds alternate slots would orphan
+	 * every one of them, each being wrapped under the current wkey_1. The
+	 * FORCE_* commands only rewrite ROOT_DDOBJ and never replace the key.
+	 */
+	if ((dcp->cp_cmd == DCP_CMD_NEW_KEY ||
+	    dcp->cp_cmd == DCP_CMD_INHERIT) && dd->dd_object == rddobj) {
+		ret = dsl_crypto_key_slot_has_extra(dp->dp_meta_objset,
+		    dd->dd_crypto_obj, &has_extra);
+		if (ret != 0)
+			goto error;
+		if (has_extra) {
+			ret = SET_ERROR(EINVAL);
+			goto error;
+		}
+	}
 
 	/* Handle inheritance */
 	if (dcp->cp_cmd == DCP_CMD_INHERIT ||
