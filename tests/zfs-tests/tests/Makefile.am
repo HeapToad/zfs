@@ -775,6 +775,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/cli_root/zfs_change-key/zfs_change-key_clones.ksh \
 	functional/cli_root/zfs_change-key/zfs_change-key_format.ksh \
 	functional/cli_root/zfs_change-key/zfs_change-key_inherit.ksh \
+	functional/cli_root/zfs_change-key/zfs_change-key_keyslots.ksh \
 	functional/cli_root/zfs_change-key/zfs_change-key.ksh \
 	functional/cli_root/zfs_change-key/zfs_change-key_load.ksh \
 	functional/cli_root/zfs_change-key/zfs_change-key_location.ksh \
