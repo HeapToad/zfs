@@ -617,6 +617,7 @@ _LIBZFS_H int zfs_crypto_add_keyslot(zfs_handle_t *, uint64_t, nvlist_t *,
     uint64_t *);
 _LIBZFS_H int zfs_crypto_remove_keyslot(zfs_handle_t *, uint64_t);
 _LIBZFS_H int zfs_crypto_unload_key(zfs_handle_t *);
+_LIBZFS_H int zfs_crypto_change_key_slots_check(zfs_handle_t *);
 _LIBZFS_H int zfs_crypto_rewrap(zfs_handle_t *, nvlist_t *, boolean_t);
 _LIBZFS_H boolean_t zfs_is_encrypted(zfs_handle_t *);
 

@@ -2017,6 +2017,63 @@ error:
 	return (ret);
 }
 
+/*
+ * Refuse a key change on an encryption root that holds alternate slots. Every
+ * slot is wrapped under the primary wrapping key, so replacing it would make
+ * all of them unusable. The kernel enforces this as well; this is the half that
+ * runs before any key is prompted for, kept in one place so that the condition
+ * and the message cannot drift between callers.
+ *
+ * Reports its own error, so callers must not report it again.
+ */
+int
+zfs_crypto_change_key_slots_check(zfs_handle_t *zhp)
+{
+	int ret;
+	uint_t count = 0;
+	boolean_t is_encroot;
+	nvlist_t *slots = NULL;
+	nvpair_t *elem;
+
+	ret = zfs_crypto_get_encryption_root(zhp, &is_encroot, NULL);
+	if (ret != 0) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "Failed to get encryption root for '%s'.",
+		    zfs_get_name(zhp));
+		zfs_error(zhp->zfs_hdl, EZFS_CRYPTOFAILED, "Key change error");
+		return (ret);
+	}
+
+	/* a non-root rewrap leaves the root's primary key alone */
+	if (!is_encroot)
+		return (0);
+
+	ret = zfs_crypto_get_keyslots(zhp, &slots);
+	if (ret != 0) {
+		zfs_error_aux(zhp->zfs_hdl, "Failed to get key slots for '%s'.",
+		    zfs_get_name(zhp));
+		zfs_error(zhp->zfs_hdl, EZFS_CRYPTOFAILED, "Key change error");
+		return (ret);
+	}
+
+	for (elem = nvlist_next_nvpair(slots, NULL); elem != NULL;
+	    elem = nvlist_next_nvpair(slots, elem))
+		count++;
+	nvlist_free(slots);
+
+	if (count == 0)
+		return (0);
+
+	zfs_error_aux(zhp->zfs_hdl,
+	    "cannot change key: '%s' has %llu extra key slot(s); changing the "
+	    "primary key would make them unusable; remove them with "
+	    "'zfs keyslot remove -S <n>' first",
+	    zfs_get_name(zhp), (u_longlong_t)count);
+	zfs_error(zhp->zfs_hdl, EZFS_CRYPTOFAILED, "Key change error");
+
+	return (EINVAL);
+}
+
 int
 zfs_crypto_rewrap(zfs_handle_t *zhp, nvlist_t *raw_props, boolean_t inheritkey)
 {
