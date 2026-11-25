@@ -8910,6 +8910,19 @@ zfs_do_change_key(int argc, char **argv)
 		usage(B_FALSE);
 
 	if (loadkey) {
+		/*
+		 * Refuse before the old key is loaded, because that load can
+		 * prompt: on a root with alternate slots the rewrap cannot
+		 * succeed, so the prompt would be wasted. The helper reports
+		 * its own error.
+		 */
+		ret = zfs_crypto_change_key_slots_check(zhp);
+		if (ret != 0) {
+			nvlist_free(props);
+			zfs_close(zhp);
+			return (-1);
+		}
+
 		keystatus = zfs_prop_get_int(zhp, ZFS_PROP_KEYSTATUS);
 		if (keystatus != ZFS_KEYSTATUS_AVAILABLE) {
 			ret = zfs_crypto_load_key(zhp, B_FALSE, NULL);
