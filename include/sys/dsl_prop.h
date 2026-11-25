@@ -23,6 +23,14 @@
 #include <sys/zfs_context.h>
 #include <sys/dsl_synctask.h>
 
+/*
+ * Property names are stored in the dsl_dir property ZAP with one of these
+ * suffixes appended.
+ */
+#define	ZPROP_INHERIT_SUFFIX	"$inherit"
+#define	ZPROP_RECVD_SUFFIX	"$recvd"
+#define	ZPROP_IUV_SUFFIX	"$iuv"
+
 #ifdef	__cplusplus
 extern "C" {
 #endif

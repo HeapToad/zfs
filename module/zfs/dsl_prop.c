@@ -31,10 +31,6 @@
 
 #include "zfs_prop.h"
 
-#define	ZPROP_INHERIT_SUFFIX "$inherit"
-#define	ZPROP_RECVD_SUFFIX "$recvd"
-#define	ZPROP_IUV_SUFFIX "$iuv"
-
 static int
 dodefault(zfs_prop_t prop, int intsz, int numints, void *buf)
 {

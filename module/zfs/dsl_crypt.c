@@ -2726,7 +2726,8 @@ dsl_dataset_promote_crypt_check(dsl_dir_t *target, dsl_dir_t *origin)
  * Move the per-slot key locations from the origin to the target while the
  * encryption root moves, exactly as keylocation is moved: a location names the
  * source of a slot entry, and the slot entries themselves follow ROOT_DDOBJ.
- * The origin is cleared rather than copied, so no value sits in two places.
+ * A location the origin received counts too, so the origin is cleared in every
+ * layer rather than copied: no value sits in two places.
  */
 static void
 dsl_crypto_key_slot_promote_locations(dsl_dir_t *origin,
@@ -2738,6 +2739,7 @@ dsl_crypto_key_slot_promote_locations(dsl_dir_t *origin,
 	nvpair_t *elem;
 	zap_cursor_t *zc;
 	zap_attribute_t *za;
+	size_t suffix_len = strlen(ZPROP_RECVD_SUFFIX);
 	char *value;
 
 	/*
@@ -2749,12 +2751,28 @@ dsl_crypto_key_slot_promote_locations(dsl_dir_t *origin,
 	for (zap_cursor_init(zc, mos, zapobj);
 	    zap_cursor_retrieve(zc, za) == 0;
 	    zap_cursor_advance(zc)) {
-		if (!zfs_prop_keyslot_location(za->za_name, NULL))
+		const char *name = za->za_name;
+		char bare[ZAP_MAXNAMELEN];
+		size_t len = strlen(name);
+
+		/*
+		 * A location the origin received is stored under the same name
+		 * with the received suffix appended, which the slot parse would
+		 * reject. Strip it so the slot is recognised; the nvlist then
+		 * dedupes a local and a received entry for the same slot.
+		 */
+		if (len > suffix_len && strcmp(name + len - suffix_len,
+		    ZPROP_RECVD_SUFFIX) == 0) {
+			(void) strlcpy(bare, name, len - suffix_len + 1);
+			name = bare;
+		}
+
+		if (!zfs_prop_keyslot_location(name, NULL))
 			continue;
 
 		if (names == NULL)
 			names = fnvlist_alloc();
-		fnvlist_add_boolean(names, za->za_name);
+		fnvlist_add_boolean(names, name);
 	}
 	zap_cursor_fini(zc);
 	kmem_free(zc, sizeof (*zc));
@@ -2772,7 +2790,8 @@ dsl_crypto_key_slot_promote_locations(dsl_dir_t *origin,
 		    value, NULL, B_FALSE));
 		dsl_prop_set_sync_impl(targetds, name, ZPROP_SRC_LOCAL, 1,
 		    strlen(value) + 1, value, tx);
-		dsl_prop_set_sync_impl(originds, name, ZPROP_SRC_NONE, 0, 0,
+		dsl_prop_set_sync_impl(originds, name,
+		    ZPROP_SRC_NONE | ZPROP_SRC_LOCAL | ZPROP_SRC_RECEIVED, 0, 0,
 		    NULL, tx);
 	}
 	kmem_free(value, ZAP_MAXVALUELEN);
