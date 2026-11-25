@@ -211,6 +211,16 @@ Alternatively, the
 flag may be provided to cause an encryption root to inherit the parent's key
 instead.
 .Pp
+Changing the key on an encryption root that holds extra key slots
+.Pq n >= 2
+is refused, including with
+.Fl i ,
+because each slot wraps the encryption root's wrapping key and replacing that
+key would make every slot unusable.
+Remove the extra slots first with
+.Nm zfs Cm keyslot Cm remove Fl S Ar n
+.Pq see Xr zfs-keyslot 8 .
+.Pp
 If the user's key is compromised,
 .Nm zfs Cm change-key
 does not necessarily protect existing or newly-written data from attack.
@@ -237,6 +247,9 @@ if supported by your hardware, otherwise
 Ensures the key is loaded before attempting to change the key.
 This is effectively equivalent to running
 .Nm zfs Cm load-key Ar filesystem ; Nm zfs Cm change-key Ar filesystem
+in sequence, except that the slot check described above runs before the load,
+so an encryption root that holds extra key slots is refused without prompting
+for the old key.
 .It Fl o Ar property Ns = Ns Ar value
 Allows the user to set encryption key properties
 .Pq Sy keyformat , keylocation , No and Sy pbkdf2iters
