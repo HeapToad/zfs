@@ -501,7 +501,7 @@ error:
 
 int
 zio_crypt_slot_wrap(uint64_t crypt, crypto_key_t *slot_key, uint64_t guid,
-    uint64_t version, uint64_t slot, const uint8_t *wkey, uint8_t *iv,
+    uint64_t version, uint64_t slot, uint8_t *wkey, uint8_t *iv,
     uint8_t *mac, uint8_t *cipher)
 {
 	int ret;
@@ -544,7 +544,7 @@ zio_crypt_slot_wrap(uint64_t crypt, crypto_key_t *slot_key, uint64_t guid,
 	if (ret != 0)
 		return (ret);
 
-	zfs_uio_iovbase(&puio, idx) = (void *)wkey;
+	zfs_uio_iovbase(&puio, idx) = wkey;
 	zfs_uio_iovlen(&puio, idx) = WRAPPING_KEY_LEN;
 	zfs_uio_iovbase(&cuio, idx) = cipher;
 	zfs_uio_iovlen(&cuio, idx) = WRAPPING_KEY_LEN;
@@ -562,7 +562,7 @@ zio_crypt_slot_wrap(uint64_t crypt, crypto_key_t *slot_key, uint64_t guid,
 
 int
 zio_crypt_slot_unwrap(uint64_t crypt, crypto_key_t *slot_key, uint64_t guid,
-    uint64_t version, uint64_t slot, const uint8_t *cipher, const uint8_t *iv,
+    uint64_t version, uint64_t slot, uint8_t *cipher, const uint8_t *iv,
     uint8_t *mac, uint8_t *wkey)
 {
 	int ret;
@@ -596,7 +596,7 @@ zio_crypt_slot_unwrap(uint64_t crypt, crypto_key_t *slot_key, uint64_t guid,
 	if (ret != 0)
 		return (ret);
 
-	zfs_uio_iovbase(&cuio, idx) = (void *)cipher;
+	zfs_uio_iovbase(&cuio, idx) = cipher;
 	zfs_uio_iovlen(&cuio, idx) = WRAPPING_KEY_LEN;
 	zfs_uio_iovbase(&puio, idx) = wkey;
 	zfs_uio_iovlen(&puio, idx) = WRAPPING_KEY_LEN;

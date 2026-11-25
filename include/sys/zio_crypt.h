@@ -123,10 +123,10 @@ int zio_crypt_key_wrap(crypto_key_t *cwkey, zio_crypt_key_t *key, uint8_t *iv,
  * a user should map it to EACCES, as the existing key loading code does.
  */
 int zio_crypt_slot_wrap(uint64_t crypt, crypto_key_t *slot_key, uint64_t guid,
-    uint64_t version, uint64_t slot, const uint8_t *wkey, uint8_t *iv,
+    uint64_t version, uint64_t slot, uint8_t *wkey, uint8_t *iv,
     uint8_t *mac, uint8_t *cipher);
 int zio_crypt_slot_unwrap(uint64_t crypt, crypto_key_t *slot_key, uint64_t guid,
-    uint64_t version, uint64_t slot, const uint8_t *cipher, const uint8_t *iv,
+    uint64_t version, uint64_t slot, uint8_t *cipher, const uint8_t *iv,
     uint8_t *mac, uint8_t *wkey);
 int zio_crypt_key_unwrap(crypto_key_t *cwkey, uint64_t crypt, uint64_t version,
     uint64_t guid, uint8_t *keydata, uint8_t *hmac_keydata, uint8_t *iv,
