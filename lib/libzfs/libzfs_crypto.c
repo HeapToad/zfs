@@ -1589,6 +1589,20 @@ zfs_crypto_verify_keyslot_nvlist(zfs_handle_t *zhp, nvlist_t *props,
 }
 
 /*
+ * One refusal for any slot verb aimed below the encryption root. The verb and
+ * its preposition are the only part that differs, so the sentence lives here
+ * rather than being duplicated at each site (design P5 §7).
+ */
+static void
+zfs_crypto_keyslot_root_error(zfs_handle_t *zhp, const char *verb,
+    const char *encroot)
+{
+	zfs_error_aux(zhp->zfs_hdl,
+	    "Key slots must be %s the encryption root of '%s' (%s).",
+	    verb, zfs_get_name(zhp), encroot);
+}
+
+/*
  * Add a key slot to an encryption root. `props` carries the slot's derivation
  * parameters as the CLI's raw `-o` values (keyformat, and optionally
  * keylocation and pbkdf2iters), which are converted and validated here exactly
@@ -1666,9 +1680,7 @@ zfs_crypto_add_keyslot(zfs_handle_t *zhp, uint64_t slot, nvlist_t *props,
 		    zfs_get_name(zhp));
 		goto error;
 	} else if (!is_encroot) {
-		zfs_error_aux(zhp->zfs_hdl,
-		    "Key slots must be added to the encryption root of '%s' "
-		    "(%s).", zfs_get_name(zhp), prop_encroot);
+		zfs_crypto_keyslot_root_error(zhp, "added to", prop_encroot);
 		ret = EINVAL;
 		goto error;
 	}
@@ -1808,9 +1820,8 @@ zfs_crypto_remove_keyslot(zfs_handle_t *zhp, uint64_t slot)
 		    zfs_get_name(zhp));
 		goto error;
 	} else if (!is_encroot) {
-		zfs_error_aux(zhp->zfs_hdl,
-		    "Key slots must be removed from the encryption root of "
-		    "'%s' (%s).", zfs_get_name(zhp), prop_encroot);
+		zfs_crypto_keyslot_root_error(zhp, "removed from",
+		    prop_encroot);
 		ret = EINVAL;
 		goto error;
 	}

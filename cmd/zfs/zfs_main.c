@@ -9041,6 +9041,20 @@ keyslot_emit_row(nvlist_t *json, uint64_t slot, uint64_t keyformat,
 }
 
 /*
+ * One refusal for any slot verb aimed below the encryption root, mirroring
+ * libzfs's helper so the sentence cannot drift between the two layers (design
+ * P5 §7). This group prints directly rather than through zfs_error_aux.
+ */
+static void
+keyslot_root_error(const zfs_handle_t *zhp, const char *verb,
+    const char *encroot)
+{
+	(void) fprintf(stderr,
+	    "Key slots must be %s the encryption root of '%s' (%s).\n",
+	    verb, zfs_get_name(zhp), encroot);
+}
+
+/*
  * Print one row per key slot of an encryption root, slot 1 included, sorted by
  * slot number. Parameters come from the stats channel and sources from the
  * property layer (design P5 §1, §10); the channel carries no sealed material,
@@ -9084,9 +9098,7 @@ zfs_do_keyslot_list(zfs_handle_t *zhp, boolean_t scripted, boolean_t parsable,
 		return (-1);
 	}
 	if (!is_encroot) {
-		(void) fprintf(stderr,
-		    "Key slots must be listed for the encryption root of '%s' "
-		    "(%s).\n", zfs_get_name(zhp), encroot);
+		keyslot_root_error(zhp, "listed for", encroot);
 		return (-1);
 	}
 
@@ -9211,9 +9223,7 @@ zfs_do_keyslot_set(zfs_handle_t *zhp, uint64_t slot, nvlist_t *props)
 		return (-1);
 	}
 	if (!is_encroot) {
-		(void) fprintf(stderr,
-		    "Key slots must be set for the encryption root of '%s' "
-		    "(%s).\n", zfs_get_name(zhp), encroot);
+		keyslot_root_error(zhp, "set for", encroot);
 		return (-1);
 	}
 
