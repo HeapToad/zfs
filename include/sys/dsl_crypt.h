@@ -77,8 +77,8 @@ typedef enum dsl_crypto_key_slot_field {
 /*
  * Arguments for adding a key slot to an encryption root's key object. The
  * caller fills in the slot's key material and parameters; the check pass fills
- * in the root's key object, the chosen slot number and the root's wrapping key
- * for the sync pass to use.
+ * in the root's key object, its guid and cipher suite, the chosen slot number
+ * and the root's wrapping key for the sync pass to use.
  */
 typedef struct dsl_crypto_key_slot_args {
 	/* caller input */
