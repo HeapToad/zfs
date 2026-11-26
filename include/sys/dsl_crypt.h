@@ -92,6 +92,8 @@ typedef struct dsl_crypto_key_slot_args {
 
 	/* filled in by the check pass */
 	uint64_t dcks_dckobj;			/* root's key object */
+	uint64_t dcks_guid;			/* key object's guid */
+	uint64_t dcks_crypt;			/* key object's cipher suite */
 	uint8_t dcks_wkey_1[WRAPPING_KEY_LEN];	/* root's wrapping key */
 } dsl_crypto_key_slot_args_t;
 

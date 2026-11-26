@@ -942,6 +942,22 @@ dsl_crypto_key_slot_add_check(dsl_dataset_t *ds,
 	}
 
 	args->dcks_dckobj = dd->dd_crypto_obj;
+
+	/*
+	 * The sync pass seals the slot with these, so read them here where a
+	 * failure can still be reported. They are fixed for the life of the key
+	 * object.
+	 */
+	ret = zap_lookup(mos, args->dcks_dckobj, DSL_CRYPTO_KEY_GUID, 8, 1,
+	    &args->dcks_guid);
+	if (ret != 0)
+		return (ret);
+
+	ret = zap_lookup(mos, args->dcks_dckobj, DSL_CRYPTO_KEY_CRYPTO_SUITE,
+	    8, 1, &args->dcks_crypt);
+	if (ret != 0)
+		return (ret);
+
 	return (0);
 }
 
@@ -955,7 +971,6 @@ dsl_crypto_key_slot_add_sync(dsl_dataset_t *ds,
 {
 	objset_t *mos = ds->ds_dir->dd_pool->dp_meta_objset;
 	uint64_t dckobj = args->dcks_dckobj;
-	uint64_t guid, crypt;
 	crypto_key_t slot_key;
 	uint8_t iv[WRAPPING_IV_LEN];
 	uint8_t mac[WRAPPING_MAC_LEN];
@@ -965,15 +980,11 @@ dsl_crypto_key_slot_add_sync(dsl_dataset_t *ds,
 	ASSERT3U(args->dcks_slot, >=, 2);
 	ASSERT3U(args->dcks_dckobj, !=, 0);
 
-	VERIFY0(zap_lookup(mos, dckobj, DSL_CRYPTO_KEY_GUID, 8, 1, &guid));
-	VERIFY0(zap_lookup(mos, dckobj, DSL_CRYPTO_KEY_CRYPTO_SUITE, 8, 1,
-	    &crypt));
-
 	slot_key.ck_length = CRYPTO_BYTES2BITS(WRAPPING_KEY_LEN);
 	slot_key.ck_data = args->dcks_wkey_n;
 
-	VERIFY0(zio_crypt_slot_wrap(crypt, &slot_key, guid,
-	    ZIO_CRYPT_KEY_CURRENT_VERSION, args->dcks_slot,
+	VERIFY0(zio_crypt_slot_wrap(args->dcks_crypt, &slot_key,
+	    args->dcks_guid, ZIO_CRYPT_KEY_CURRENT_VERSION, args->dcks_slot,
 	    args->dcks_wkey_1, iv, mac, cipher));
 
 	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, args->dcks_slot,
