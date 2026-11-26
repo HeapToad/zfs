@@ -161,6 +161,7 @@ nobase_dist_datadir_zfs_tests_tests_DATA += \
 	functional/cli_root/zfs_get/zfs_get_common.kshlib \
 	functional/cli_root/zfs_get/zfs_get_list_d.kshlib \
 	functional/cli_root/zfs_jail/jail.conf \
+	functional/cli_root/zfs_keyslot/zfs_keyslot.kshlib \
 	functional/cli_root/zfs_load-key/HEXKEY \
 	functional/cli_root/zfs_load-key/PASSPHRASE \
 	functional/cli_root/zfs_load-key/RAWKEY \
@@ -887,6 +888,12 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/cli_root/zfs_jail/cleanup.ksh \
 	functional/cli_root/zfs_jail/setup.ksh \
 	functional/cli_root/zfs_jail/zfs_jail_001_pos.ksh \
+	functional/cli_root/zfs_keyslot/cleanup.ksh \
+	functional/cli_root/zfs_keyslot/setup.ksh \
+	functional/cli_root/zfs_keyslot/zfs_keyslot_001_pos.ksh \
+	functional/cli_root/zfs_keyslot/zfs_keyslot_002_pos.ksh \
+	functional/cli_root/zfs_keyslot/zfs_keyslot_003_pos.ksh \
+	functional/cli_root/zfs_keyslot/zfs_keyslot_004_pos.ksh \
 	functional/cli_root/zfs_list/cleanup.ksh \
 	functional/cli_root/zfs_list/setup.ksh \
 	functional/cli_root/zfs_list/zfs_list_009_pos.ksh \

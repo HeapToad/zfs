@@ -79,13 +79,14 @@ function slot_key_obj
 # WRAP, IV and MAC are printed as raw bytes whose tail differs between two
 # dumps of the same unchanged object, so they are excluded here and proven
 # intact by unlocking with the slot instead. ROOT_DDOBJ is excluded because
-# promote rewrites it.
+# promote rewrites it, and REFCOUNT because promote leaves the origin as a
+# second holder of the same key object.
 #
 function slots_hash
 {
 	zdb -dddddd $TESTPOOL $1 | grep -a 'DSL_CRYPTO' | \
-	    grep -avE 'DSL_CRYPTO_(ROOT_DDOBJ|WRAP_[0-9]|IV_[0-9]|MAC_[0-9])' | \
-	    sort | md5sum | awk '{ print $1 }'
+	    grep -avE 'DSL_CRYPTO_(ROOT_DDOBJ|REFCOUNT|WRAP_[0-9]|IV_[0-9]|MAC_[0-9])' | \
+	    sort | cksum | awk '{ print $1 }'
 }
 
 #

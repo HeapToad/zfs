@@ -1,0 +1,143 @@
+# SPDX-License-Identifier: CDDL-1.0
+#
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
+#
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
+#
+
+#
+# Copyright (c) 2026 Umer Saleem
+#
+
+. $STF_SUITE/include/libtest.shlib
+. $STF_SUITE/tests/functional/cli_root/zfs_load-key/zfs_load-key_common.kshlib
+
+#
+# The encryption root's key object is the one carrying the slot entries; a
+# child's key object has none. Any slot >= 2 identifies it, because a caller
+# may have removed the slot it was looking for. Returns 1 rather than failing,
+# so it is safe to use in a command substitution.
+#
+function keyslot_key_obj
+{
+	typeset pool=$1
+	typeset obj
+
+	for obj in $(keyslot_key_objs $pool); do
+		if zdb -dddddd $pool $obj | grep -aqE 'DSL_CRYPTO_WRAP_[0-9]+'
+		then
+			echo $obj
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+#
+# Every key object id in the pool, one per line, in ascending order.
+#
+function keyslot_key_objs
+{
+	zdb -dddddd $1 | grep -a 'crypto_key_obj' | sed 's/.*= //' | sort -un
+}
+
+#
+# A stable fingerprint of one key object. WRAP, IV and MAC are rendered as raw
+# bytes and their tail differs between two dumps of the same unchanged object,
+# so they are excluded here and proven intact by unlocking with the slot
+# instead. Everything else, ROOT_DDOBJ included, is deterministic, so the
+# fingerprint changes if any other entry does.
+#
+function keyslot_obj_hash
+{
+	zdb -dddddd $1 $2 | grep -a 'DSL_CRYPTO' | \
+	    grep -avE 'DSL_CRYPTO_(WRAP_[0-9]|IV|MAC)' | sort | cksum | \
+	    awk '{ print $1 }'
+}
+
+#
+# One line per key object, "<object id> <fingerprint>". Taken before and after
+# an operation it shows that only the intended object changed.
+#
+function keyslot_obj_snapshot
+{
+	typeset pool=$1
+	typeset obj
+
+	for obj in $(keyslot_key_objs $pool); do
+		echo "$obj $(keyslot_obj_hash $pool $obj)"
+	done
+}
+
+#
+# The slots of an encryption root, in order, as a comma separated list.
+#
+function keyslot_slots
+{
+	zfs keyslot list -H $1 | awk '
+	    { s = s (NR > 1 ? "," : "") $1 }
+	    END { print s }'
+}
+
+#
+# Unmount a dataset and its children, children first. Errors are ignored: a
+# dataset that is not mounted must not fail a caller that only wants the tree
+# quiet before unload-key.
+#
+function keyslot_unmount_tree
+{
+	typeset name
+
+	for name in $(zfs list -H -o name -r $1 | sort -r); do
+		zfs unmount $name 2>/dev/null
+	done
+}
+
+#
+# Unlock the tree rooted at $1 from slot $2, unmounting it first. The key can
+# still read as loaded (after a promote, for instance), so unload it when it
+# does.
+#
+function keyslot_unlock
+{
+	typeset ds=$1 slot=$2
+
+	keyslot_unmount_tree $ds
+	if key_available $ds; then
+		log_must zfs unload-key $ds
+	fi
+
+	if [[ $slot == 1 ]]; then
+		log_must zfs load-key $ds
+	else
+		log_must zfs load-key -S $slot $ds
+	fi
+
+	log_must key_available $ds
+}
+
+#
+# Run a command that must fail with output matching $1. The refusals' messages
+# are part of the contract, so they are asserted, not just the exit status.
+#
+function keyslot_mustfail
+{
+	typeset pattern=$1
+	shift
+	typeset out rc first
+
+	out=$("$@" 2>&1)
+	rc=$?
+
+	# a usage error prints its whole table; the first line is the message
+	first=$(echo "$out" | head -1)
+	log_note "output: $first"
+	log_must test $rc -ne 0
+	log_must eval "echo \"$out\" | grep -q '$pattern'"
+}
