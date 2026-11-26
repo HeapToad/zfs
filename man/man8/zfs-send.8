@@ -21,7 +21,7 @@
 .\" Copyright 2019 Joyent, Inc.
 .\" Copyright (c) 2024, Klara, Inc.
 .\"
-.Dd February 20, 2026
+.Dd November 26, 2026
 .Dt ZFS-SEND 8
 .Os
 .
@@ -246,6 +246,20 @@ keys as it did on the send side, although the
 property will be defaulted to
 .Sy prompt
 if not otherwise provided.
+Any additional key slots are sent with the data, so every independent key of the
+dataset travels in the stream.
+A slot's stored source is a property, so it is reproduced on the receiving
+system when
+.Fl p
+is also given; without
+.Fl p
+an extra slot has to be loaded with
+.Fl L .
+An implementation that does not support key slots ignores them without
+reporting an error, so a stream from a dataset that has extra key slots must be
+received on a system that supports the
+.Sy keyslots
+feature.
 For unencrypted datasets, this flag will be equivalent to
 .Fl Lec .
 Note that if you do not use this flag for sending encrypted datasets, data will
@@ -419,6 +433,20 @@ keys as it did on the send side, although the
 property will be defaulted to
 .Sy prompt
 if not otherwise provided.
+Any additional key slots are sent with the data, so every independent key of the
+dataset travels in the stream.
+A slot's stored source is a property, so it is reproduced on the receiving
+system when
+.Fl p
+is also given; without
+.Fl p
+an extra slot has to be loaded with
+.Fl L .
+An implementation that does not support key slots ignores them without
+reporting an error, so a stream from a dataset that has extra key slots must be
+received on a system that supports the
+.Sy keyslots
+feature.
 For unencrypted datasets, this flag will be equivalent to
 .Fl Lec .
 Note that if you do not use this flag for sending encrypted datasets, data will

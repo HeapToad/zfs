@@ -11,7 +11,7 @@
 .\"
 .\" Copyright (c) 2026 Umer Saleem
 .\"
-.Dd November 24, 2026
+.Dd November 26, 2026
 .Dt ZFS-KEYSLOT 8
 .Os
 .
@@ -85,6 +85,30 @@ must be
 .Sy available .
 Changing a slot's source and listing slots read only metadata and work on a
 locked root.
+.Pp
+The boot-time and login-time unlock path uses slot 1: tools such as
+.Nm zfs Cm mount Fl l ,
+the systemd mount generator, dracut, and
+.Xr pam_zfs_key 8
+call
+.Nm zfs Cm load-key
+without
+.Fl S .
+Slot 1 must therefore stay loadable without interaction, and an extra slot does
+not replace it; slots 2 and above are unlocked explicitly with
+.Fl S .
+.Pp
+Slots are part of the dataset, so a raw send
+.Pq Nm zfs Cm send Fl w
+carries every slot, and each slot's stored source travels with the properties
+when
+.Fl p
+is given.
+An implementation that does not support key slots ignores them without
+reporting an error, so a stream from a dataset that has extra key slots must be
+received on a system that supports the
+.Sy keyslots
+feature.
 .Bl -tag -width ""
 .It Xo
 .Nm zfs
@@ -137,8 +161,18 @@ slot's key; see
 .Pp
 The command fails if the
 .Sy keyslots
-feature is not enabled, if the key is not loaded, or if the requested slot is
-already in use.
+feature is not enabled, if the key is not loaded, if the dataset was created
+with an encryption version that cannot hold key slots, or if the requested slot
+is already in use.
+.Pp
+Adding a slot activates the
+.Sy keyslots
+pool feature.
+This is one-way: once a slot has been written, a build that does not support key
+slots cannot import the pool at all, not even read-only, so a rescue environment
+needs an implementation that has the feature.
+Removing the slot does not reverse this
+.Pq see Xr zpool-features 7 .
 .It Xo
 .Nm zfs
 .Cm keyslot
@@ -230,8 +264,9 @@ requires the
 .Sy keylocation
 permission, and
 .Nm zfs Cm keyslot Cm list
-is not gated, because it prints only metadata that is already readable through
-.Xr zfsprops 7 .
+is not gated, because it prints only the slot metadata that
+.Nm zfs Cm get
+already reports.
 See
 .Xr zfs-allow 8 .
 .Pp

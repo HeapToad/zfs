@@ -29,7 +29,7 @@
 .\" Copyright (c) 2019, Kjeld Schouten-Lebbing
 .\" Copyright (c) 2022 Hewlett Packard Enterprise Development LP.
 .\"
-.Dd October 30, 2026
+.Dd November 26, 2026
 .Dt ZFSPROPS 7
 .Os
 .
@@ -1294,6 +1294,41 @@ and
 .Sy SSL_CLIENT_KEY_FILE
 environment variables can be set to configure the path
 to the client certificate and its key.
+.It Xo
+.Sy keylocation_ Ns Ar n Ns = Ns Sy prompt Ns | Ns Sy file:// Ns Ar /absolute/file/path Ns | Ns Sy https:// Ns Ar address Ns | Ns Sy http:// Ns Ar address
+.Xc
+Controls where key slot
+.Ar n
+of an encryption root will be loaded from, for any
+.Ar n
+of 2 or greater.
+Slot 1 uses the
+.Sy keylocation
+property, and
+.Sy keylocation_1
+is not a valid name.
+An encryption root can hold any number of slots, so any such name is accepted,
+whether or not that slot exists; a location for a slot that does not yet exist
+is ignored until the slot is added.
+.Pp
+Like
+.Sy keylocation ,
+this property is only set for encrypted datasets which are encryption roots, and
+it is not inherited.
+.Nm zfs Cm keyslot Cm add
+sets it when a slot is created, and
+.Nm zfs Cm keyslot Cm set Fl S Ar n
+changes it in place
+.Po see
+.Xr zfs-keyslot 8
+.Pc ;
+.Nm zfs Cm set
+also accepts it directly.
+It is sent and received with
+.Nm zfs Cm send Fl p ,
+and changes are authorized by the
+.Sy keylocation
+permission.
 .It Sy pbkdf2iters Ns = Ns Ar iterations
 Controls the number of PBKDF2 iterations that a
 .Sy passphrase

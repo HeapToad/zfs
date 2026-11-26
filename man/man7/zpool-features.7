@@ -16,7 +16,7 @@
 .\" Copyright (c) 2019, Allan Jude
 .\" Copyright (c) 2021, Colm Buckley <colm@tuatha.org>
 .\"
-.Dd July 23, 2025
+.Dd November 26, 2026
 .Dt ZPOOL-FEATURES 7
 .Os
 .
@@ -734,7 +734,8 @@ so any one of the slot's keys can unlock the dataset's tree.
 This feature becomes
 .Sy active
 when the first additional key slot is written and will never return to being
-.Sy enabled .
+.Sy enabled ,
+even if every extra key slot is later removed.
 Once it is active, the pool cannot be imported, even read-only, by an
 implementation that does not support this feature.
 .

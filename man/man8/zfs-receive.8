@@ -20,7 +20,7 @@
 .\" Copyright 2018 Nexenta Systems, Inc.
 .\" Copyright 2019 Joyent, Inc.
 .\"
-.Dd March 12, 2023
+.Dd November 26, 2026
 .Dt ZFS-RECEIVE 8
 .Os
 .
@@ -149,6 +149,17 @@ during a receive.
 This is because the receive process itself is already using
 the standard input for the send stream.
 Instead, the property can be overridden after the receive completes.
+.Pp
+Raw streams can also carry key slots beyond the primary one.
+A pool must have the
+.Sy keyslots
+feature enabled to receive them; a pool without it refuses the stream and asks
+to be upgraded.
+A receiving implementation that does not support key slots ignores them without
+reporting an error, so the received dataset keeps only its primary slot; such a
+stream has to be received on a system that supports the
+.Sy keyslots
+feature.
 .Pp
 The added security provided by raw sends adds some restrictions to the send
 and receive process.
