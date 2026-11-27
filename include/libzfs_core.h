@@ -64,6 +64,8 @@ _LIBZFS_CORE_H int lzc_change_key(const char *, uint64_t, nvlist_t *, uint8_t *,
 _LIBZFS_CORE_H int lzc_keyslot_add(const char *, uint64_t, nvlist_t *,
     uint8_t *, uint_t, uint64_t *);
 _LIBZFS_CORE_H int lzc_keyslot_remove(const char *, uint64_t);
+_LIBZFS_CORE_H int lzc_keyslot_rewrap(const char *, uint64_t, nvlist_t *,
+    uint8_t *, uint_t);
 _LIBZFS_CORE_H int lzc_initialize(const char *, pool_initialize_func_t,
     uint64_t, boolean_t, nvlist_t *, nvlist_t **);
 _LIBZFS_CORE_H int lzc_trim(const char *, pool_trim_func_t, uint64_t, boolean_t,

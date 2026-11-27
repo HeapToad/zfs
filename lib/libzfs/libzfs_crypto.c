@@ -1589,6 +1589,53 @@ zfs_crypto_verify_keyslot_nvlist(zfs_handle_t *zhp, nvlist_t *props,
 }
 
 /*
+ * Convert the raw `-o` nvlist of a rewrap. Only keylocation and pbkdf2iters are
+ * accepted: a slot's type is fixed when it is created, so keyformat is refused
+ * here rather than being silently ignored, and the kernel refuses a format that
+ * differs from the slot's own. No properties at all is valid, so `props` may be
+ * NULL. As for add, zfs_valid_proplist() converts and validates the values.
+ */
+static int
+zfs_crypto_verify_rewrap_keyslot_nvlist(zfs_handle_t *zhp, nvlist_t *props,
+    nvlist_t **props_out, char *errbuf)
+{
+	nvpair_t *elem = NULL;
+	nvlist_t *new_props;
+
+	*props_out = NULL;
+	if (props == NULL)
+		return (0);
+
+	while ((elem = nvlist_next_nvpair(props, elem)) != NULL) {
+		switch (zfs_name_to_prop(nvpair_name(elem))) {
+		case ZFS_PROP_KEYLOCATION:
+		case ZFS_PROP_PBKDF2_ITERS:
+			break;
+		case ZFS_PROP_KEYFORMAT:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "A key slot's keyformat is fixed; only "
+			    "keylocation and pbkdf2iters may be "
+			    "specified when rewrapping a key slot.");
+			return (EINVAL);
+		default:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "Only keylocation and pbkdf2iters may be "
+			    "specified when rewrapping a key slot.");
+			return (EINVAL);
+		}
+	}
+
+	new_props = zfs_valid_proplist(zhp->zfs_hdl, zhp->zfs_type, props,
+	    zfs_prop_get_int(zhp, ZFS_PROP_ZONED), zhp, zhp->zpool_hdl,
+	    B_TRUE, errbuf);
+	if (new_props == NULL)
+		return (EINVAL);
+
+	*props_out = new_props;
+	return (0);
+}
+
+/*
  * One refusal for any slot verb aimed below the encryption root. The verb and
  * its preposition are the only part that differs, so the sentence lives here
  * rather than being duplicated at each site (design P5 §7).
@@ -1873,6 +1920,222 @@ zfs_crypto_remove_keyslot(zfs_handle_t *zhp, uint64_t slot)
 	return (0);
 
 error:
+	zfs_error(zhp->zfs_hdl, EZFS_CRYPTOFAILED, errbuf);
+
+	return (ret);
+}
+
+/*
+ * Rewrap a key slot: replace the secret that unlocks slot n, keeping the slot
+ * number and the slot's keyformat. The old secret is never read: the root's key
+ * must be loaded, and wkey_1 in memory is what authorises the operation - the
+ * same authority keyslot remove plus keyslot add already need (design P5
+ * section 15).
+ */
+int
+zfs_crypto_rewrap_keyslot(zfs_handle_t *zhp, uint64_t slot, nvlist_t *props)
+{
+	int ret;
+	char errbuf[ERRBUFLEN];
+	char prop_encroot[MAXNAMELEN];
+	char num[32];
+	nvlist_t *typed_props = NULL, *slots = NULL, *slotnvl = NULL;
+	uint64_t keyformat = ZFS_KEYFORMAT_NONE;
+	const char *keylocation = NULL;
+	uint8_t *key_data = NULL;
+	uint_t key_datalen = 0;
+	boolean_t is_encroot;
+
+	(void) snprintf(errbuf, sizeof (errbuf),
+	    "Key slot rewrap error");
+
+	if (slot == 0) {
+		zfs_error_aux(zhp->zfs_hdl, "Slot 0 is not a key slot.");
+		ret = EINVAL;
+		goto error;
+	}
+
+	/* slot 1's entries wrap the master key; rekeying it is change-key's */
+	if (slot == DSL_CRYPTO_KEY_SLOT_PRIMARY) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "slot 1 is the primary slot; use 'zfs change-key' to "
+		    "rekey it");
+		ret = EINVAL;
+		goto error;
+	}
+
+	if (zfs_prop_get_int(zhp, ZFS_PROP_ENCRYPTION) == ZIO_CRYPT_OFF) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "'%s' is not encrypted.", zfs_get_name(zhp));
+		ret = EINVAL;
+		goto error;
+	}
+
+	/*
+	 * Take the raw properties and convert them the way the create path
+	 * does, so the values are validated in one place rather than in each
+	 * caller. No property at all is valid here, so an empty set is
+	 * allocated to carry the defaults.
+	 */
+	ret = zfs_crypto_verify_rewrap_keyslot_nvlist(zhp, props,
+	    &typed_props, errbuf);
+	if (ret != 0)
+		goto error;
+
+	if (typed_props == NULL)
+		typed_props = fnvlist_alloc();
+	props = typed_props;
+
+	/* slots live on the encryption root's key object, as for add */
+	ret = zfs_crypto_get_encryption_root(zhp, &is_encroot, prop_encroot);
+	if (ret != 0) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "Failed to get encryption root for '%s'.",
+		    zfs_get_name(zhp));
+		goto error;
+	} else if (!is_encroot) {
+		zfs_crypto_keyslot_root_error(zhp, "rewrapped for",
+		    prop_encroot);
+		ret = EINVAL;
+		goto error;
+	}
+
+	/* check the feature and the loaded key before asking for a secret */
+	if (!feature_is_enabled(zhp->zpool_hdl, SPA_FEATURE_KEYSLOTS)) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "pool does not have the keyslots feature enabled");
+		ret = ENOTSUP;
+		goto error;
+	}
+
+	/*
+	 * This also loads the handle, which the slot-list channel needs:
+	 * zfs_crypto_get_keyslots() is EINVAL on an unloaded handle.
+	 */
+	if (zfs_prop_get_int(zhp, ZFS_PROP_KEYSTATUS) !=
+	    ZFS_KEYSTATUS_AVAILABLE) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "key must be loaded to rewrap a slot");
+		ret = EACCES;
+		goto error;
+	}
+
+	/*
+	 * The slot's type is fixed, so it comes from the slot-list channel and
+	 * not from the command line. A slot whose parameter entries cannot be
+	 * read is absent from that channel, which is why the kernel's
+	 * corrupt-slot EINVAL is reachable only through the ioctl.
+	 */
+	(void) snprintf(num, sizeof (num), "%llu", (u_longlong_t)slot);
+	ret = zfs_crypto_get_keyslots(zhp, &slots);
+	if (ret != 0) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "Failed to get key slots for '%s'.", zfs_get_name(zhp));
+		goto error;
+	}
+	if (nvlist_lookup_nvlist(slots, num, &slotnvl) != 0) {
+		zfs_error_aux(zhp->zfs_hdl, "key slot %llu does not exist",
+		    (u_longlong_t)slot);
+		ret = ENOENT;
+		goto error;
+	}
+	(void) nvlist_lookup_uint64(slotnvl, "keyformat", &keyformat);
+
+	/*
+	 * A slot that is in the channel but whose stored type is not one we
+	 * support cannot be rewrapped: nothing could derive the new secret.
+	 */
+	if (keyformat >= ZFS_KEYFORMAT_FORMATS ||
+	    keyformat == ZFS_KEYFORMAT_NONE) {
+		zfs_error_aux(zhp->zfs_hdl,
+		    "key slot %llu is corrupt; remove it and add a new one",
+		    (u_longlong_t)slot);
+		ret = EINVAL;
+		goto error;
+	}
+
+	/*
+	 * Hand the recorded type to the kernel too: it refuses a request whose
+	 * format differs from KEYFORMAT_<n>, so an ioctl caller cannot change a
+	 * slot's type. This is the only place props gains a keyformat; the CLI
+	 * refuses -o keyformat outright.
+	 */
+	ret = nvlist_add_uint64(props,
+	    zfs_prop_to_name(ZFS_PROP_KEYFORMAT), keyformat);
+	if (ret != 0)
+		goto error;
+
+	/* default to prompt if no keylocation is specified, as create does */
+	(void) nvlist_lookup_string(props,
+	    zfs_prop_to_name(ZFS_PROP_KEYLOCATION), &keylocation);
+	if (keylocation == NULL) {
+		keylocation = (char *)"prompt";
+		ret = nvlist_add_string(props,
+		    zfs_prop_to_name(ZFS_PROP_KEYLOCATION), keylocation);
+		if (ret != 0)
+			goto error;
+	}
+
+	/*
+	 * New secret, new salt, new IV. An omitted pbkdf2iters takes the
+	 * default, as for change-key and keyslot add: a rewrap is a
+	 * re-derivation, not a change of the slot's policy (L-D3).
+	 */
+	ret = populate_create_encryption_params_nvlists(zhp->zfs_hdl, zhp,
+	    B_TRUE, keyformat, keylocation, props, &key_data, &key_datalen);
+	if (ret != 0)
+		goto error;
+
+	ret = lzc_keyslot_rewrap(zhp->zfs_name, slot, props, key_data,
+	    key_datalen);
+	if (ret != 0) {
+		switch (ret) {
+		case EPERM:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "Permission denied.");
+			break;
+		case EACCES:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "key must be loaded to rewrap a slot");
+			break;
+		case ENOENT:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "key slot %llu does not exist",
+			    (u_longlong_t)slot);
+			break;
+		case ENOTSUP:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "pool does not have the keyslots feature enabled");
+			break;
+		case EINVAL:
+			/*
+			 * libzfs has validated the properties and read the
+			 * slot's type, so a kernel EINVAL here means the slot
+			 * changed under us: its keyformat is unreadable or
+			 * unsupported.
+			 */
+			zfs_error_aux(zhp->zfs_hdl,
+			    "key slot %llu is corrupt; remove it and add a "
+			    "new one", (u_longlong_t)slot);
+			break;
+		case E2BIG:
+			zfs_error_aux(zhp->zfs_hdl,
+			    "keylocation is too long");
+			break;
+		}
+		goto error;
+	}
+
+	free(key_data);
+	nvlist_free(slots);
+	nvlist_free(typed_props);
+
+	return (0);
+
+error:
+	free(key_data);
+	nvlist_free(slots);
+	nvlist_free(typed_props);
 	zfs_error(zhp->zfs_hdl, EZFS_CRYPTOFAILED, errbuf);
 
 	return (ret);

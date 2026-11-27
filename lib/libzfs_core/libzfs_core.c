@@ -1971,6 +1971,39 @@ lzc_keyslot_remove(const char *fsname, uint64_t slot)
 	return (error);
 }
 
+/*
+ * Rewrap a key slot: replace the secret that unlocks slot n, keeping the slot
+ * number and the slot's keyformat. The new wrapping key is derived by the
+ * caller and travels in hidden_args, as for keyslot add; the kernel reports
+ * nothing back.
+ */
+int
+lzc_keyslot_rewrap(const char *fsname, uint64_t slot, nvlist_t *props,
+    uint8_t *wkeydata, uint_t wkeylen)
+{
+	int error;
+	nvlist_t *ioc_args, *hidden_args;
+
+	if (wkeydata == NULL || slot == 0)
+		return (EINVAL);
+
+	ioc_args = fnvlist_alloc();
+	fnvlist_add_uint64(ioc_args, "slot", slot);
+	if (props != NULL)
+		fnvlist_add_nvlist(ioc_args, "props", props);
+
+	hidden_args = fnvlist_alloc();
+	fnvlist_add_uint8_array(hidden_args, "wkeydata", wkeydata, wkeylen);
+	fnvlist_add_nvlist(ioc_args, ZPOOL_HIDDEN_ARGS, hidden_args);
+
+	error = lzc_ioctl(ZFS_IOC_KEYSLOT_REWRAP, fsname, ioc_args, NULL);
+
+	nvlist_free(hidden_args);
+	nvlist_free(ioc_args);
+
+	return (error);
+}
+
 int
 lzc_reopen(const char *pool_name, boolean_t scrub_restart)
 {
