@@ -105,3 +105,20 @@ of the file at the `keylocation` as the key follows.
 key="$(b2sum "${KEYLOCATION#file://}")" || return
 printf '%s\n' "${key%% *}" | $ZFS load-key -L prompt "$ENCRYPTIONROOT"
 ```
+
+### Key slots
+
+If the encryption root has key slots above the primary one (see
+`zfs-keyslot(8)`), and no extension hook loaded the key, the boot script tries
+every slot whose stored source is a `file://` or `http(s)://` location, in
+ascending order, and then offers one passphrase prompt to every `passphrase`
+slot. A recovery passphrase that exists only in a slot above the primary one is
+therefore enough to boot.
+
+The extension hooks still see the primary slot's stored location in
+`$KEYLOCATION`; they run before the slot handling.
+
+Once a slot has been added, a build that does not support the `keyslots` pool
+feature cannot import the pool, not even read-only. On a root pool, regenerate
+the initramfs after installing a build that has the feature and before adding
+the first slot.

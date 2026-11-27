@@ -97,17 +97,42 @@ is what authorizes the operation.
 Changing a slot's source and listing slots read only metadata and work on a
 locked root.
 .Pp
-The boot-time and login-time unlock path uses slot 1: tools such as
+The unlock paths that have no human present read slot 1 and never try another
+slot:
 .Nm zfs Cm mount Fl l ,
-the systemd mount generator, dracut, and
+.Nm zpool Cm import Fl l ,
+.Nm zpool Cm split Fl l ,
+the systemd mount generator
+.Pq see Xr zfs-mount-generator 8 ,
+the SysV
+.Sy zfs-load-key
+init script,
+and the
+.Fx
+.Sy zfskeys
+script.
+Slot 1 must therefore stay loadable without interaction if one of them is
+relied on, and an extra slot does not replace it.
+Interactive unlock paths do use the extra slots.
+The initramfs-tools boot script and the dracut hooks try each slot's stored
+source first and then offer one typed secret to every
+.Sy passphrase
+slot;
+.Sy zfsunlock
+and
 .Xr pam_zfs_key 8
-call
-.Nm zfs Cm load-key
-without
-.Fl S .
-Slot 1 must therefore stay loadable without interaction, and an extra slot does
-not replace it; slots 2 and above are unlocked explicitly with
-.Fl S .
+offer the secret to every
+.Sy passphrase
+slot.
+A recovery passphrase held only in a slot above the primary one therefore
+still unlocks the dataset at boot or at login.
+.Nm zfs Cm load-key Fl S Ar slot
+selects a slot explicitly, and
+.Fl a
+and
+.Fl r
+apply the selection to every encryption root they reach
+.Pq see Xr zfs-load-key 8 .
 .Pp
 Slots are part of the dataset, so a raw send
 .Pq Nm zfs Cm send Fl w
@@ -184,6 +209,9 @@ slots cannot import the pool at all, not even read-only, so a rescue environment
 needs an implementation that has the feature.
 Removing the slot does not reverse this
 .Pq see Xr zpool-features 7 .
+On a root pool, regenerate the initramfs after installing a build that supports
+the feature and before adding the first slot: an initramfs built from an
+implementation without it cannot import the pool, so the system would not boot.
 .It Xo
 .Nm zfs
 .Cm keyslot

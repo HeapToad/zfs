@@ -61,6 +61,51 @@ Use
 .Xr zfs-change-key 8
 to resync passwords after partial failure.
 .
+.Ss Key Slots
+The module derives each candidate key from the user's password.
+Slot 1, the primary slot, is tried first when it holds a passphrase, so a
+dataset with no other slots behaves as it always has.
+If it does not match, every slot above the primary one whose key format is
+.Sy passphrase
+is tried in ascending order, each with that slot's own salt and iteration
+count
+.Pq see Xr zfs-keyslot 8 .
+.Sy raw
+and
+.Sy hex
+slots are never tried: a login password cannot unlock them.
+.Pp
+A password change updates the one slot the old password unlocks and nothing
+else.
+Without extra slots, a match on slot 1 rekeys it exactly as before.
+With extra slots, slot 1 is never rekeyed: the module refuses, because
+.Nm zfs Cm change-key
+refuses while those slots exist, and replacing the owner's primary secret is
+not the module's decision.
+A match on a slot above the primary one rewraps only that slot; its number and
+key format are kept, and its stored location becomes
+.Sy prompt ,
+which is the source the password prompt supplies.
+If more than one slot above the primary one holds the same password, only the
+lowest is rewrapped, so the others continue to accept the old one.
+A password that unlocks no slot is refused and nothing is changed.
+Both refusals are logged to syslog:
+.Bd -literal -offset indent
+"the password matches the primary key slot and alternate key slots exist;
+refusing to rekey it"
+"the old password does not unlock any key slot; nothing changed"
+.Ed
+.Pp
+To keep the login password in a slot above the primary one, create that slot
+ahead of time and leave slot 1 with its own secret:
+.Bd -literal -offset indent
+# zfs keyslot add -S 2 -o keyformat=passphrase \e
+    -o keylocation=prompt rpool/home/alice
+.Ed
+.Pp
+The same user password then unlocks the dataset at login, and a password change
+rewraps that slot instead of slot 1.
+.
 .Sh OPTIONS
 .Bl -tag -width "mount_recursively"
 .It Sy homes Ns = Ns Ar path Ns Oo , Ns Ar path2 Ns ... Oc
@@ -177,8 +222,10 @@ and
     rpool/home/alice
 .Ed
 .Pp
-The user's login password must match the dataset passphrase for automatic
-unlocking to work.
+The user's login password must match the dataset passphrase, or the passphrase
+of a slot above the primary one
+.Pq see Sx Key Slots ,
+for automatic unlocking to work.
 The dataset must have a ZFS-managed mountpoint (not legacy) and
 .Sy canmount Ns = Ns Sy on
 for automatic mounting.
@@ -200,17 +247,28 @@ for failure behavior.
 .Sh SEE ALSO
 .Xr pam 8 ,
 .Xr zfs-change-key 8 ,
+.Xr zfs-keyslot 8 ,
 .Xr zfs-load-key 8 ,
 .Xr zfs-mount 8
 .
 .Sh NOTES
 .Bl -bullet -compact
 .It
-Only works with datasets using
-.Sy keyformat Ns = Ns Sy passphrase .
+The login password must match a
+.Sy passphrase
+key slot: slot 1 or a slot above it.
+.Sy raw
+and
+.Sy hex
+slots are never tried.
 .It
-Datasets must have
-.Sy keylocation Ns = Ns Sy prompt .
+The module derives the key from the password itself, so a stored
+.Sy keylocation
+is not read at login; the password has to be the slot's passphrase.
+.It
+For a dataset that also has recovery slots, put the login password in a slot
+above the primary one
+.Pq see Sx Key Slots .
 .It
 Datasets with
 .Sy mountpoint Ns = Ns Sy legacy ,
