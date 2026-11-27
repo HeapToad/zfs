@@ -32,6 +32,8 @@
 #    is incorrect, and leaves keystatus unavailable.
 # 4. After each failed attempt the primary slot still unlocks the tree, so the
 #    failure installed nothing and did not disturb the other slots.
+# 5. A passphrase slot records its format as a format, not as a format with part
+#    of the salt in the upper half, and unlocks the tree from that slot.
 #
 
 verify_runnable "both"
@@ -44,7 +46,7 @@ function cleanup
 	    keyslot_unmount_tree $TESTPOOL/$TESTFS1
 	datasetexists $TESTPOOL/$TESTFS1 && \
 	    destroy_dataset $TESTPOOL/$TESTFS1 -r
-	rm -f $TESTDIR/kskey.[0-9] $TESTDIR/kskey.wrong
+	rm -f $TESTDIR/kskey.[0-9] $TESTDIR/kskey.wrong "$TESTDIR/pass key"
 }
 log_onexit cleanup
 
@@ -102,5 +104,32 @@ for slot in 1 2 3; do
 	log_must key_available $encroot
 	log_must zfs unload-key $encroot
 done
+
+#
+# 5. A passphrase slot stores its keyformat as a keyformat: the 8-byte entry
+#    must not carry part of the salt in its upper half. The location also
+#    contains a space, which only a tab-separated listing can carry.
+#
+typeset passroot=$TESTPOOL/$TESTFS1/encpass
+typeset passphrase="password1"
+typeset kf salt loc
+
+log_must eval "echo $passphrase > \"$TESTDIR/pass key\""
+log_must zfs create -o encryption=on -o keyformat=passphrase \
+    -o "keylocation=file://$TESTDIR/pass key" $passroot
+log_must zfs keyslot add -S 2 -o keyformat=passphrase \
+    -o "keylocation=file://$TESTDIR/pass key" $passroot
+
+kf=$(zfs keyslot list -Hp $passroot | awk -F'\t' '$1 == 2 { print $2 }')
+salt=$(zfs keyslot list -Hp $passroot | awk -F'\t' '$1 == 2 { print $3 }')
+loc=$(zfs keyslot list -Hp $passroot | awk -F'\t' '$1 == 2 { print $5 }')
+log_note "slot 2: keyformat=$kf salt=$salt location=$loc"
+log_must test "$kf" = "3"
+log_must test "$salt" -ne 0
+log_must test "$loc" = "file://$TESTDIR/pass key"
+
+log_must zfs unload-key $passroot
+log_must zfs load-key -S 2 $passroot
+log_must key_available $passroot
 
 log_pass "every slot unlocks the tree, and a wrong key installs nothing"

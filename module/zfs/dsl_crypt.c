@@ -971,6 +971,12 @@ dsl_crypto_key_slot_add_sync(dsl_dataset_t *ds,
 {
 	objset_t *mos = ds->ds_dir->dd_pool->dp_meta_objset;
 	uint64_t dckobj = args->dcks_dckobj;
+	/*
+	 * The slot entries are 64-bit integers, and dcks_keyformat is a 4-byte
+	 * zfs_keyformat_t whose neighbours in the struct are other write
+	 * sources, so the value is widened before the write reads it.
+	 */
+	uint64_t keyformat = args->dcks_keyformat;
 	crypto_key_t slot_key;
 	uint8_t iv[WRAPPING_IV_LEN];
 	uint8_t mac[WRAPPING_MAC_LEN];
@@ -994,7 +1000,7 @@ dsl_crypto_key_slot_add_sync(dsl_dataset_t *ds,
 	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, args->dcks_slot,
 	    DSL_CRYPTO_KEY_SLOT_MAC, 1, WRAPPING_MAC_LEN, mac, tx));
 	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, args->dcks_slot,
-	    DSL_CRYPTO_KEY_SLOT_KEYFORMAT, 8, 1, &args->dcks_keyformat, tx));
+	    DSL_CRYPTO_KEY_SLOT_KEYFORMAT, 8, 1, &keyformat, tx));
 	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, args->dcks_slot,
 	    DSL_CRYPTO_KEY_SLOT_PBKDF2SALT, 8, 1, &args->dcks_salt, tx));
 	VERIFY0(dsl_crypto_key_slot_write(mos, dckobj, args->dcks_slot,
