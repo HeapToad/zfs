@@ -57,7 +57,9 @@ unlock_with_secret()
 	then
 		_secret="${2}"
 	else
-		read -r _secret || return 1
+		# IFS is cleared so the secret keeps its own leading and
+		# trailing spaces, which load-key would have preserved.
+		IFS= read -r _secret || return 1
 	fi
 
 	_pass_slots=$(printf '%s\n' "${_slot_list}" |
