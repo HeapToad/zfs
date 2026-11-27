@@ -429,6 +429,136 @@ mount_fs()
 	return 0
 }
 
+# Try one secret against every passphrase slot of an encryption root.
+#
+# $1 = encryption root, $2 = the secret. Without $2 the secret is read from
+# standard input, so a prompter's output can be piped in; the console path
+# passes it as an argument instead, which keeps one prompt to one secret.
+#
+# The enumeration is the only source of slot facts: a slot that is not listed
+# is skipped, never guessed at. -L prompt is required, otherwise a slot with a
+# stored source would read that file instead of the typed secret. A failed
+# attempt is silent, because a wrong secret fails once per slot; the caller
+# reports one failure per prompt.
+try_passphrase_slots()
+{
+	_root="${1}"
+	_secret="${2}"
+
+	# An empty secret is still a secret; only a missing argument means
+	# there is one to read, which keeps a blank console entry from turning
+	# into a second read.
+	if [ ${#} -lt 2 ]
+	then
+		read -r _secret
+	fi
+
+	_pass_slots="$("${ZFS}" keyslot list -Hp "${_root}" 2>/dev/null |
+	    awk -F'\t' '$2 == 3 { print $1 }')"
+	[ -n "${_pass_slots}" ] || return 1
+
+	for _n in ${_pass_slots}
+	do
+		printf '%s\n' "${_secret}" |
+		    "${ZFS}" load-key -L prompt -S "${_n}" "${_root}" \
+		    2>/dev/null && return 0
+	done
+
+	return 1
+}
+
+# Read one secret from the console with echo disabled.
+#
+# $1 = encryption root, for the prompt. The secret is left in _secret.
+#
+# The passphrase must not be echoed, so a missing stty refuses to prompt rather
+# than falling back to a read that would echo it.
+read_secret()
+{
+	if ! command -v stty >/dev/null 2>&1
+	then
+		echo "Cannot read the passphrase for '${1}': stty is missing." >&2
+		return 1
+	fi
+
+	printf 'Encrypted ZFS password for %s: ' "${1}"
+	stty -echo
+	read -r _secret
+	_read_status="${?}"
+	stty echo
+	printf '\n'
+
+	return "${_read_status}"
+}
+
+# Unlock an encryption root that has key slots beyond the primary one.
+#
+# $1 = encryption root, $2 = the output of `zfs keyslot list -Hp $1`.
+#
+# Slots whose stored source is a file or an URL are tried first, ascending, and
+# then one secret is offered to every passphrase slot. Only the enumeration
+# decides which slots exist and what each one holds; the prompt text is the one
+# this script already uses and never names a slot.
+decrypt_slots()
+{
+	_root="${1}"
+	_slot_list="${2}"
+
+	_stored_slots="$(printf '%s\n' "${_slot_list}" |
+	    awk -F'\t' '$5 ~ /^(file|https?):\/\// { print $1 }')"
+	for _n in ${_stored_slots}
+	do
+		"${ZFS}" load-key -S "${_n}" "${_root}"
+		KEYSTATUS="$(get_fs_value "${_root}" keystatus)"
+		[ "${KEYSTATUS}" = "unavailable" ] || return 0
+	done
+
+	# Only a passphrase slot can use a typed secret.
+	_passphrase_slots="$(printf '%s\n' "${_slot_list}" |
+	    awk -F'\t' '$2 == 3 { print $1 }')"
+	[ -n "${_passphrase_slots}" ] || return 0
+
+	if /bin/plymouth --ping 2>/dev/null
+	then
+		echo "plymouth" > /run/zfs_console_askpwd_cmd
+		for _attempt in 1 2 3
+		do
+			plymouth ask-for-password --prompt \
+					 "Encrypted ZFS password for ${_root}" | \
+				try_passphrase_slots "${_root}" && break
+		done
+	elif [ -e /run/systemd/system ]
+	then
+		echo "systemd-ask-password" > /run/zfs_console_askpwd_cmd
+		for _attempt in 1 2 3
+		do
+			systemd-ask-password \
+				--no-tty \
+				"Encrypted ZFS password for ${_root}" | \
+				try_passphrase_slots "${_root}" && break
+		done
+	else
+		# Temporarily setting "printk" to "7" allows the prompt to appear
+		# even when the "quiet" kernel option has been used.
+		echo "load-key" > /run/zfs_console_askpwd_cmd
+		read -r storeprintk _ < /proc/sys/kernel/printk
+		echo 7 > /proc/sys/kernel/printk
+		for _attempt in 1 2 3
+		do
+			read_secret "${_root}" || break
+			try_passphrase_slots "${_root}" "${_secret}" && break
+		done
+		echo "${storeprintk}" > /proc/sys/kernel/printk
+	fi
+
+	# A failing slot says nothing about the secret: the key is loaded or it is
+	# not.
+	KEYSTATUS="$(get_fs_value "${_root}" keystatus)"
+	[ "${KEYSTATUS}" = "unavailable" ] || return 0
+
+	return 1
+}
+
 # Unlock a ZFS native encrypted filesystem.
 decrypt_fs()
 {
@@ -463,6 +593,20 @@ decrypt_fs()
 					[ "${KEYSTATUS}" = "unavailable" ] || return 0
 				}
 			done
+
+			# A root with key slots beyond the primary one is unlocked by
+			# the enumeration; a root without them keeps the single-slot
+			# path below unchanged, as does one whose userspace cannot
+			# list slots at all.
+			_slot_list="$("${ZFS}" keyslot list -Hp \
+			    "${ENCRYPTIONROOT}" 2>/dev/null)"
+			_extra_slots="$(printf '%s\n' "${_slot_list}" |
+			    awk -F'\t' 'NR > 1 { print "yes"; exit }')"
+			if [ -n "${_extra_slots}" ]
+			then
+				decrypt_slots "${ENCRYPTIONROOT}" "${_slot_list}"
+				return 0
+			fi
 
 			# Do not prompt if key is stored noninteractively,
 			if [ "${KEYLOCATION}" != "prompt" ]
