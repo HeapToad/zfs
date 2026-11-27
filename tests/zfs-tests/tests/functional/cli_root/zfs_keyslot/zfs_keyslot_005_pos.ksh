@@ -232,9 +232,21 @@ log_must add_user $deleg_group $deleg_user
 log_must zfs allow $deleg_user keyslot $encroot
 log_must user_run $deleg_user zfs keyslot rewrap -S 2 \
     -o keylocation=file://$TESTDIR/kspass $encroot
-log_must zfs unallow $deleg_user keyslot $encroot
 log_must test "$(slot_field $encroot 2 5)" = "file://$TESTDIR/kspass"
 log_must test "$(slot_field $encroot 2 3)" != "$salt_before"
+verify_tree 2 "$delegpass"
+
+#
+# Without the permission the same call is refused by the kernel, and it changes
+# nothing. The material comes from a file here as well, so no prompt can fail
+# before the permission is checked.
+#
+log_must zfs unallow $deleg_user keyslot $encroot
+typeset deleg_salt=$(slot_field $encroot 2 3)
+log_mustnot user_run $deleg_user zfs keyslot rewrap -S 2 \
+    -o keylocation=file://$TESTDIR/kspass $encroot
+log_must grep -q 'Permission denied' $TEST_BASE_DIR/err
+log_must test "$(slot_field $encroot 2 3)" = "$deleg_salt"
 verify_tree 2 "$delegpass"
 
 log_pass "rewrap replaces one slot's secret and leaves everything else alone"
