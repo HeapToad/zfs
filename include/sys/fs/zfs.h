@@ -1719,6 +1719,7 @@ typedef enum zfs_ioc {
 	ZFS_IOC_POOL_CONDENSE,			/* 0x5a5a */
 	ZFS_IOC_KEYSLOT_ADD,			/* 0x5a5b */
 	ZFS_IOC_KEYSLOT_REMOVE,			/* 0x5a5c */
+	ZFS_IOC_KEYSLOT_REWRAP,			/* 0x5a5d */
 
 	/*
 	 * Per-platform (Optional) - 8/128 numbers reserved.

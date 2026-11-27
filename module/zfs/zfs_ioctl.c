@@ -8037,6 +8037,77 @@ out:
 }
 
 /*
+ * Rewrap a key slot on an encryption root: replace the secret that unlocks
+ * slot n, keeping the number and the slot's keyformat. The new wrapping key is
+ * derived in userspace and travels in hidden_args, like keyslot-add's; no key
+ * material crosses this ioctl in either direction.
+ *
+ * innvl: {
+ *     "slot" -> uint64
+ *         slot to rewrap; it must exist, and slot 1 cannot be rewrapped
+ *     (optional) "props" -> { prop -> value }
+ *         keyformat (must equal the slot's), keylocation, pbkdf2salt,
+ *         pbkdf2iters
+ *     "hidden_args" -> { "wkeydata" -> value }
+ *         raw uint8_t array of the slot's new wrapping key data (32 bytes)
+ * }
+ *
+ * outnvl is unused
+ */
+static const zfs_ioc_key_t zfs_keys_keyslot_rewrap[] = {
+	{"slot",		DATA_TYPE_UINT64,	0},
+	{"props",		DATA_TYPE_NVLIST,	ZK_OPTIONAL},
+	{"hidden_args",		DATA_TYPE_NVLIST,	0},
+};
+
+static int
+zfs_ioc_keyslot_rewrap(const char *dsname, nvlist_t *innvl, nvlist_t *outnvl)
+{
+	int ret;
+	uint64_t slot = 0;
+	nvlist_t *props = NULL, *hidden_args = NULL;
+	dsl_crypto_params_t *dcp = NULL;
+	dsl_crypto_key_slot_args_t args = { 0 };
+
+	(void) outnvl;
+
+	if (strchr(dsname, '@') != NULL || strchr(dsname, '%') != NULL)
+		return (SET_ERROR(EINVAL));
+
+	(void) nvlist_lookup_uint64(innvl, "slot", &slot);
+	(void) nvlist_lookup_nvlist(innvl, "props", &props);
+	(void) nvlist_lookup_nvlist(innvl, ZPOOL_HIDDEN_ARGS, &hidden_args);
+
+	ret = dsl_crypto_params_create_nvlist(DCP_CMD_NONE, props, hidden_args,
+	    &dcp);
+	if (ret != 0)
+		goto out;
+
+	/* the slot's new wrapping key is derived by the caller: required */
+	if (dcp->cp_wkey == NULL) {
+		ret = SET_ERROR(EINVAL);
+		goto out;
+	}
+
+	args.dcks_slot = slot;
+	args.dcks_keyformat = dcp->cp_wkey->wk_keyformat;
+	args.dcks_salt = dcp->cp_wkey->wk_salt;
+	args.dcks_iters = dcp->cp_wkey->wk_iters;
+	args.dcks_keylocation = dcp->cp_keylocation;
+	memcpy(args.dcks_wkey_n, dcp->cp_wkey->wk_key.ck_data,
+	    WRAPPING_KEY_LEN);
+
+	ret = spa_keystore_keyslot_rewrap(dsname, &args);
+
+out:
+	/* args holds the slot key and the root's wrapping key */
+	memset(&args, 0, sizeof (args));
+	dsl_crypto_params_free(dcp, B_TRUE);
+
+	return (ret);
+}
+
+/*
  * Remove a key slot from an encryption root. Its location property goes in the
  * same transaction, so a location never outlives its slot. No key material
  * crosses this ioctl.
@@ -8288,6 +8359,11 @@ zfs_ioctl_init(void)
 	    DATASET_NAME, POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY,
 	    B_TRUE, B_TRUE, zfs_keys_keyslot_add,
 	    ARRAY_SIZE(zfs_keys_keyslot_add));
+	zfs_ioctl_register("keyslot-rewrap", ZFS_IOC_KEYSLOT_REWRAP,
+	    zfs_ioc_keyslot_rewrap, zfs_secpolicy_keyslot,
+	    DATASET_NAME, POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY,
+	    B_TRUE, B_TRUE, zfs_keys_keyslot_rewrap,
+	    ARRAY_SIZE(zfs_keys_keyslot_rewrap));
 	zfs_ioctl_register("keyslot-remove", ZFS_IOC_KEYSLOT_REMOVE,
 	    zfs_ioc_keyslot_remove, zfs_secpolicy_keyslot,
 	    DATASET_NAME, POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY,

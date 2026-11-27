@@ -1096,6 +1096,19 @@ spa_keystore_keyslot_add(const char *dsname, dsl_crypto_key_slot_args_t *args)
 	    dsl_crypto_key_slot_add_check, dsl_crypto_key_slot_add_sync));
 }
 
+/*
+ * Rewrap a slot: the sync pass is add's, because the slot number and all six
+ * entries it writes are the same. Only the check differs - the slot must
+ * already exist, and its type must be the one the caller asked for.
+ */
+int
+spa_keystore_keyslot_rewrap(const char *dsname,
+    dsl_crypto_key_slot_args_t *args)
+{
+	return (spa_keystore_keyslot_task(dsname, args,
+	    dsl_crypto_key_slot_rewrap_check, dsl_crypto_key_slot_add_sync));
+}
+
 int
 spa_keystore_keyslot_remove(const char *dsname,
     dsl_crypto_key_slot_args_t *args)
@@ -1333,6 +1346,113 @@ dsl_crypto_key_slot_remove_sync(dsl_dataset_t *ds,
 	dsl_prop_set_sync_impl(ds, name,
 	    ZPROP_SRC_NONE | ZPROP_SRC_LOCAL | ZPROP_SRC_RECEIVED, 0, 0, NULL,
 	    tx);
+}
+
+/*
+ * Check that slot n can be rewrapped on ds. The slot must already exist and
+ * its type must be readable, because a rewrap preserves it. Every failure
+ * condition lives here; the sync pass is add's, which cannot fail.
+ */
+int
+dsl_crypto_key_slot_rewrap_check(dsl_dataset_t *ds,
+    dsl_crypto_key_slot_args_t *args)
+{
+	int ret;
+	dsl_dir_t *dd = ds->ds_dir;
+	spa_t *spa = dd->dd_pool->dp_spa;
+	objset_t *mos = dd->dd_pool->dp_meta_objset;
+	uint64_t rddobj, stored = 0;
+	/*
+	 * The entry is eight bytes and dcks_keyformat is a four-byte
+	 * zfs_keyformat_t, so the value is widened before it is compared.
+	 */
+	uint64_t keyformat = args->dcks_keyformat;
+	boolean_t exists;
+
+	/* a snapshot shares its filesystem's key object; it is not a target */
+	if (dsl_dataset_is_snapshot(ds))
+		return (SET_ERROR(EINVAL));
+
+	/* the target must be the encryption root, as for load-key */
+	ret = dsl_dir_get_encryption_root_ddobj(dd, &rddobj);
+	if (ret != 0 || rddobj != dd->dd_object)
+		return (SET_ERROR(EINVAL));
+
+	/* slots require the feature on the pool */
+	if (!spa_feature_is_enabled(spa, SPA_FEATURE_KEYSLOTS))
+		return (SET_ERROR(ENOTSUP));
+
+	/* slot 1 is the compatibility floor (D4); slot 0 is not a slot */
+	if (args->dcks_slot < 2)
+		return (SET_ERROR(EINVAL));
+
+	/*
+	 * Wrapping the root's wrapping key requires it in memory. This also
+	 * captures it for the sync pass.
+	 */
+	ret = dsl_crypto_key_slot_hold_wkey1(dd, args->dcks_wkey_1);
+	if (ret != 0)
+		return (ret);
+
+	/*
+	 * The slot must already exist; no number is allocated here. A key
+	 * object from an older encryption version has no slot entries, so that
+	 * case lands here, as it does for keyslot remove.
+	 */
+	ret = dsl_crypto_key_slot_exists(mos, dd->dd_crypto_obj,
+	    args->dcks_slot, &exists);
+	if (ret != 0)
+		return (ret);
+	if (!exists)
+		return (SET_ERROR(ENOENT));
+
+	/*
+	 * A rewrap keeps the slot's type: it must be readable and supported,
+	 * and it must be the one the caller asked for, so an ioctl caller
+	 * cannot turn a passphrase slot into a raw one. A slot that lost
+	 * KEYFORMAT_<n> is removed, not rewrapped.
+	 */
+	ret = dsl_crypto_key_slot_read_checked(mos, dd->dd_crypto_obj,
+	    args->dcks_slot, DSL_CRYPTO_KEY_SLOT_KEYFORMAT, 8, &stored);
+	if (ret == ENOENT)
+		return (SET_ERROR(EINVAL));
+	if (ret != 0)
+		return (ret);
+	if (stored >= (uint64_t)ZFS_KEYFORMAT_FORMATS ||
+	    stored == ZFS_KEYFORMAT_NONE || stored != keyformat)
+		return (SET_ERROR(EINVAL));
+
+	/* parameters must match what zfs create accepts */
+	if (!dsl_crypto_key_slot_params_valid(args->dcks_keyformat,
+	    args->dcks_salt, args->dcks_iters))
+		return (SET_ERROR(EINVAL));
+
+	/*
+	 * An optional location must be usable and must fit: the sync pass
+	 * turns it into a ZAP value, where an over-long one has no way to
+	 * report failure.
+	 */
+	if (args->dcks_keylocation != NULL) {
+		if (!zfs_prop_valid_keylocation(args->dcks_keylocation, B_TRUE))
+			return (SET_ERROR(EINVAL));
+		if (strlen(args->dcks_keylocation) >= ZAP_MAXVALUELEN)
+			return (SET_ERROR(E2BIG));
+	}
+
+	args->dcks_dckobj = dd->dd_crypto_obj;
+
+	/* the sync pass seals the slot with these */
+	ret = zap_lookup(mos, args->dcks_dckobj, DSL_CRYPTO_KEY_GUID, 8, 1,
+	    &args->dcks_guid);
+	if (ret != 0)
+		return (ret);
+
+	ret = zap_lookup(mos, args->dcks_dckobj, DSL_CRYPTO_KEY_CRYPTO_SUITE,
+	    8, 1, &args->dcks_crypt);
+	if (ret != 0)
+		return (ret);
+
+	return (0);
 }
 
 static int
