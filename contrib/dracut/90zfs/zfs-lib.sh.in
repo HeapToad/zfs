@@ -64,6 +64,47 @@ for_relevant_root_children() {
         )
 }
 
+# try_stored_slots ENCRYPTIONROOT SLOTLIST
+#   Tries the slots whose stored source is a file or an URL, in ascending
+#   order, and returns 0 when one of them unlocks the root. The wait for a key
+#   file that has not appeared yet and the network bring-up happen once, here:
+#   doing them per slot would multiply a boot-critical delay by the number of
+#   slots.
+try_stored_slots() {
+    _root="${1}"
+    _slots="${2}"
+
+    STORED="$(printf '%s\n' "${_slots}" | awk -F"${TAB}" '$5 ~ /^(file|https?):\/\// { print $1 "\t" $5 }')"
+    [ -n "${STORED}" ] || return 1
+
+    # The non-systemd mount hook has no systemctl, and never brought the
+    # network up itself; only try where the service manager exists.
+    if command -v systemctl >/dev/null 2>&1 &&
+        [ -n "$(printf '%s\n' "${STORED}" | awk -F"${TAB}" '$2 ~ /^https?:\/\// { print "yes"; exit }')" ]; then
+        systemctl start network-online.target
+    fi
+
+    KEYFILE="$(printf '%s\n' "${STORED}" | awk -F"${TAB}" '$2 ~ /^file:\/\// { sub(/^file:\/\//, "", $2); print $2; exit }')"
+    if [ -n "${KEYFILE}" ]; then
+        [ -r "${KEYFILE}" ] || udevadm settle
+        [ -r "${KEYFILE}" ] || {
+            info "ZFS: Waiting for key ${KEYFILE} for ${_root}..."
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                sleep 0.5s
+                [ -r "${KEYFILE}" ] && break
+            done
+        }
+        [ -r "${KEYFILE}" ] || warn "ZFS: Key ${KEYFILE} for ${_root} hasn't appeared. Trying anyway."
+    fi
+
+    for _n in $(printf '%s\n' "${STORED}" | awk -F"${TAB}" '{ print $1 }'); do
+        zfs load-key -S "${_n}" "${_root}"
+        [ "$(zfs get -Ho value keystatus "${_root}")" = "unavailable" ] || return 0
+    done
+
+    return 1
+}
+
 # try_passphrase_slots ENCRYPTIONROOT [SECRET]
 #   Tries one secret against every passphrase slot of the encryption root and
 #   stops at the first that accepts it. Without SECRET the secret is read from

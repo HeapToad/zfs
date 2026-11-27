@@ -124,18 +124,26 @@ if [ "$(zpool get -Ho value feature@encryption "${ZFS_POOL}")" = 'active' ]; the
 		# if the key needs to be loaded
 		if [ "$KEYSTATUS" = "unavailable" ]; then
 			# decrypt them
-			# A slotted root needs the slot loop; one without extra
-			# slots keeps the single load-key it always ran.
+			# A slotted root is unlocked from its stored locations
+			# first and is only prompted if it has a passphrase slot;
+			# one without extra slots keeps the single load-key it
+			# always ran (design P5 §14.2).
 			SLOTS="$(zfs keyslot list -Hp "${ENCRYPTIONROOT}" 2>/dev/null)" || SLOTS=""
 			if [ -n "$(printf '%s\n' "${SLOTS}" | awk -F"${TAB}" 'NR > 1 { print "yes"; exit }')" ]; then
-				CMD="unlock_root_with_stdin '${ENCRYPTIONROOT}'"
+				if ! try_stored_slots "${ENCRYPTIONROOT}" "${SLOTS}"; then
+					if [ -n "$(printf '%s\n' "${SLOTS}" | awk -F"${TAB}" '$2 == 3 { print "yes"; exit }')" ]; then
+						ask_for_password \
+							5 \
+							"Encrypted ZFS password for ${ENCRYPTIONROOT}: " \
+							"unlock_root_with_stdin '${ENCRYPTIONROOT}'"
+					fi
+				fi
 			else
-				CMD="zfs load-key '${ENCRYPTIONROOT}'"
+				ask_for_password \
+					5 \
+					"Encrypted ZFS password for ${ENCRYPTIONROOT}: " \
+					"zfs load-key '${ENCRYPTIONROOT}'"
 			fi
-			ask_for_password \
-				5 \
-				"Encrypted ZFS password for ${ENCRYPTIONROOT}: " \
-				"${CMD}"
 		fi
 	fi
 fi
