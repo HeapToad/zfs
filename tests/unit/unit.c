@@ -38,9 +38,15 @@ __set_error(const char *file, const char *func, int line, int err)
 
 /* Plumb logging and debug into munit for convenience. */
 
-/* dprintf() checks zfs_flags and calls __dprintf() in debug builds. */
-int zfs_dbgmsg_enable = 1;
-int zfs_flags = ZFS_DEBUG_DPRINTF;
+/*
+ * dprintf() checks zfs_flags and calls __dprintf() in debug builds.
+ * libzpool defines these too, so a test that links it would end up with a
+ * duplicate strong symbol. Keep ours weak: the executable's definition still
+ * takes precedence at link time, and -fsanitize=address no longer aborts on
+ * what it sees as an ODR violation.
+ */
+__attribute__((weak)) int zfs_dbgmsg_enable = 1;
+__attribute__((weak)) int zfs_flags = ZFS_DEBUG_DPRINTF;
 
 /* Log dprintf() to MUNIT_LOG_DEBUG. */
 void
