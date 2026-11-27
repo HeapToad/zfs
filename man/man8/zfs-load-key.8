@@ -143,6 +143,9 @@ if no usable source is stored.
 Combined with
 .Fl n
 this verifies the slot's key without loading it.
+A slot's secret can be replaced in place, without removing the slot, with
+.Nm zfs Cm keyslot Cm rewrap Fl S Ar slot
+.Pq see Xr zfs-keyslot 8 .
 .Pp
 Loading a slot that does not exist fails with
 .Dv ENOENT ,
@@ -232,6 +235,10 @@ Currently,
 .Nm zfs Cm change-key
 does not overwrite the previous wrapped master key on disk, so it is
 accessible via forensic analysis for an indeterminate length of time.
+A key that belongs to one of the extra slots is replaced with
+.Nm zfs Cm keyslot Cm rewrap Fl S Ar n
+instead, which leaves the root's wrapping key and the other slots untouched
+.Pq see Xr zfs-keyslot 8 .
 .Pp
 In the event of a master key compromise, ideally the drives should be securely
 erased to remove all the old data (which is readable using the compromised

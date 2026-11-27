@@ -11,13 +11,13 @@
 .\"
 .\" Copyright (c) 2026 Umer Saleem
 .\"
-.Dd November 26, 2026
+.Dd November 27, 2026
 .Dt ZFS-KEYSLOT 8
 .Os
 .
 .Sh NAME
 .Nm zfs-keyslot
-.Nd add, change, remove, or list the key slots of an encrypted dataset
+.Nd add, change, rewrap, remove, or list the key slots of an encrypted dataset
 .Sh SYNOPSIS
 .Nm zfs
 .Cm keyslot
@@ -37,6 +37,13 @@
 .Cm keyslot
 .Cm remove
 .Fl S Ar slot
+.Ar filesystem Ns | Ns Ar volume
+.Nm zfs
+.Cm keyslot
+.Cm rewrap
+.Fl S Ar slot
+.Op Fl o Ar keylocation Ns = Ns Ar value
+.Op Fl o Ar pbkdf2iters Ns = Ns Ar value
 .Ar filesystem Ns | Ns Ar volume
 .Nm zfs
 .Cm keyslot
@@ -63,6 +70,8 @@ Every slot above the primary one wraps that same key, so
 .Nm zfs Cm change-key
 on that root is refused while they exist
 .Pq see Xr zfs-load-key 8 .
+To replace the secret of one of those slots instead, use
+.Nm zfs Cm keyslot Cm rewrap .
 .Nm zfs Cm load-key
 reads slot 1 unless
 .Fl S
@@ -83,6 +92,8 @@ Adding or removing a slot requires the root's key to be loaded, so
 .Sy keystatus
 must be
 .Sy available .
+Rewrapping a slot's secret requires the key for the same reason: the loaded key
+is what authorizes the operation.
 Changing a slot's source and listing slots read only metadata and work on a
 locked root.
 .Pp
@@ -229,6 +240,62 @@ for what to do when a key is compromised.
 .It Xo
 .Nm zfs
 .Cm keyslot
+.Cm rewrap
+.Fl S Ar slot
+.Op Fl o Ar keylocation Ns = Ns Ar value
+.Op Fl o Ar pbkdf2iters Ns = Ns Ar value
+.Ar filesystem Ns | Ns Ar volume
+.Xc
+Replaces the secret that unlocks an existing slot.
+The encryption root's wrapping key is wrapped under a key derived from the new
+secret, and the slot is rewritten in one transaction, so the slot number and the
+slot's key format are kept, and the wrapping key, slot 1, and every other slot
+are unchanged.
+The old secret is not asked for, and the loaded key is what authorizes the
+operation, so a slot whose secret is lost can be rewrapped without being removed
+first.
+.Bl -tag -width "-S"
+.It Fl S Ar slot
+The slot to rewrap.
+This option is required, and the slot must exist.
+Slot 1 cannot be rewrapped: its entries wrap the master key, which
+.Nm zfs Cm change-key
+replaces.
+.It Fl o Ar keylocation Ns = Ns Ar value
+The source of the new secret, which is stored for the slot as well.
+The default is
+.Sy prompt .
+When the option is omitted the new secret comes from a prompt and the stored
+source becomes
+.Sy prompt ,
+so a slot that must stay file-backed has to name that file here, even when the
+file is unchanged.
+.It Fl o Ar pbkdf2iters Ns = Ns Ar value
+The number of PBKDF2 iterations used to derive a
+.Sy passphrase
+slot's new key.
+If the option is not given the default count is used, as for
+.Nm zfs Cm create
+and
+.Nm zfs Cm change-key ,
+so a raised count is reset unless it is given again.
+.El
+.Pp
+A slot's key format is fixed when the slot is created, so
+.Fl o Ar keyformat
+is refused.
+.Pp
+The command fails if the
+.Sy keyslots
+feature is not enabled, if the key is not loaded, if the slot does not exist, or
+if the slot's stored key format cannot be used, in which case the slot is
+removed and added again instead.
+.Pp
+A rewrap protects against future use of a compromised secret, but it is not
+secure erasure: the previous wrapping is not overwritten on disk.
+.It Xo
+.Nm zfs
+.Cm keyslot
 .Cm list
 .Op Fl Hjp
 .Ar filesystem Ns | Ns Ar volume
@@ -253,7 +320,8 @@ property.
 .El
 .El
 .Ss Delegation
-.Nm zfs Cm keyslot Cm add
+.Nm zfs Cm keyslot Cm add ,
+.Nm zfs Cm keyslot Cm rewrap ,
 and
 .Nm zfs Cm keyslot Cm remove
 require the
@@ -272,9 +340,9 @@ See
 .Pp
 A user granted
 .Sy keyslot
-can add a slot using key material of their own choosing while the root is
-unlocked, and revoking the permission does not remove that slot; it has to be
-listed, and removed, explicitly.
+can add a slot using key material of their own choosing, or replace the secret
+of an existing slot, while the root is unlocked, and revoking the permission
+does not undo either; the slot has to be listed, and removed, explicitly.
 Grant
 .Sy keyslot
 with the same care as

@@ -1316,9 +1316,11 @@ Like
 this property is only set for encrypted datasets which are encryption roots, and
 it is not inherited.
 .Nm zfs Cm keyslot Cm add
-sets it when a slot is created, and
+sets it when a slot is created,
 .Nm zfs Cm keyslot Cm set Fl S Ar n
-changes it in place
+changes it in place, and
+.Nm zfs Cm keyslot Cm rewrap Fl S Ar n
+writes it together with the slot's new material
 .Po see
 .Xr zfs-keyslot 8
 .Pc ;
