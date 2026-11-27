@@ -9008,7 +9008,8 @@ keyslot_location(zfs_handle_t *zhp, uint64_t slot)
  */
 static void
 keyslot_emit_row(nvlist_t *json, uint64_t slot, uint64_t keyformat,
-    uint64_t salt, uint64_t iters, const char *location, boolean_t parsable)
+    uint64_t salt, uint64_t iters, const char *location, boolean_t parsable,
+    boolean_t scripted)
 {
 	char kfbuf[32];
 	char num[32];
@@ -9031,6 +9032,21 @@ keyslot_emit_row(nvlist_t *json, uint64_t slot, uint64_t keyformat,
 		    (u_longlong_t)slot);
 		fnvlist_add_nvlist(json, num, item);
 		fnvlist_free(item);
+		return;
+	}
+
+	/*
+	 * -H is scripting mode, so the columns are separated by a single tab:
+	 * aligned padding cannot carry a location that contains a space, and a
+	 * tab-separated field can.
+	 */
+	if (scripted) {
+		const char *kf = keyslot_keyformat(keyformat, kfbuf,
+		    sizeof (kfbuf), parsable);
+
+		(void) printf("%llu\t%s\t%llu\t%llu\t%s\n",
+		    (u_longlong_t)slot, kf, (u_longlong_t)salt,
+		    (u_longlong_t)iters, location);
 		return;
 	}
 
@@ -9147,7 +9163,7 @@ zfs_do_keyslot_list(zfs_handle_t *zhp, boolean_t scripted, boolean_t parsable,
 	    zfs_prop_get_int(zhp, ZFS_PROP_KEYFORMAT),
 	    zfs_prop_get_int(zhp, ZFS_PROP_PBKDF2_SALT),
 	    zfs_prop_get_int(zhp, ZFS_PROP_PBKDF2_ITERS),
-	    prop_keylocation, parsable);
+	    prop_keylocation, parsable, scripted);
 
 	for (i = 0; i < n; i++) {
 		char name[32];
@@ -9163,7 +9179,7 @@ zfs_do_keyslot_list(zfs_handle_t *zhp, boolean_t scripted, boolean_t parsable,
 		(void) nvlist_lookup_uint64(slotnvl, "pbkdf2iters", &iters);
 
 		keyslot_emit_row(jslots, nums[i], keyformat, salt, iters,
-		    keyslot_location(zhp, nums[i]), parsable);
+		    keyslot_location(zhp, nums[i]), parsable, scripted);
 	}
 
 	free(nums);

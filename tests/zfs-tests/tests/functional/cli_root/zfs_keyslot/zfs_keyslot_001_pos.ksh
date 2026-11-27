@@ -148,6 +148,9 @@ log_must diff $TESTDIR/ksobj.before.other $TESTDIR/ksobj.after.other
 log_must test "$(zfs keyslot list -H $encroot | wc -l)" -eq 4
 log_must test "$(zfs keyslot list -H -p $encroot | \
     awk '$1 == 2 { print $2 }')" = "1"
+# -H is scripting mode: exactly five tab-separated columns per row.
+log_must test "$(zfs keyslot list -H -p $encroot | \
+    awk -F'\t' 'NF != 5' | wc -l)" -eq 0
 log_must eval "zfs keyslot list -j $encroot | grep -q 'keyslots'"
 log_must eval "zfs keyslot list -j $encroot | grep -q '\"4\":'"
 
