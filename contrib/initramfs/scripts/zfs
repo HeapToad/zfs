@@ -443,14 +443,16 @@ mount_fs()
 try_passphrase_slots()
 {
 	_root="${1}"
-	_secret="${2}"
 
-	# An empty secret is still a secret; only a missing argument means
-	# there is one to read, which keeps a blank console entry from turning
-	# into a second read.
-	if [ ${#} -lt 2 ]
+	# An empty secret is still a secret, so only a missing argument means
+	# there is one to read; that keeps a blank console entry from turning
+	# into a second read. IFS is cleared so the secret keeps its own leading
+	# and trailing spaces, which load-key would have preserved.
+	if [ ${#} -ge 2 ]
 	then
-		read -r _secret
+		_secret="${2}"
+	else
+		IFS= read -r _secret
 	fi
 
 	_pass_slots="$("${ZFS}" keyslot list -Hp "${_root}" 2>/dev/null |
@@ -483,7 +485,7 @@ read_secret()
 
 	printf 'Encrypted ZFS password for %s: ' "${1}"
 	stty -echo
-	read -r _secret
+	IFS= read -r _secret
 	_read_status="${?}"
 	stty echo
 	printf '\n'
