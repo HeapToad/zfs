@@ -18,11 +18,67 @@ zfs_fs_name=""
 if [ ! -e /run/zfs_unlock_complete_notify ]; then
 	mkfifo /run/zfs_unlock_complete_notify
 fi
+#
+# Try one secret against the key slots of an encryption root.
+#
+# $1 = encryption root, $2 = the secret. Without $2 the secret is read from
+# standard input, which is how the password prompt below feeds it.
+#
+# A root with key slots beyond the primary one is tried slot by slot: every
+# passphrase slot, ascending, until one accepts the secret. A root without
+# them, or one whose zfs cannot list them, takes the single load-key this
+# console has always run.
+#
+unlock_with_secret()
+{
+	_root="${1}"
+
+	_slot_list=$(/sbin/zfs keyslot list -Hp "${_root}" 2> /dev/null) || \
+	    _slot_list=""
+	_extra_slots=$(printf '%s\n' "${_slot_list}" |
+	    awk -F'\t' 'NR > 1 { print "yes"; exit }')
+
+	# No extra slots, or a zfs that cannot list them: slot 1 through the
+	# command this console has always run. Standard input is left to
+	# load-key itself unless a secret was handed in, so its own errors and
+	# its handling of a closed prompt are unchanged.
+	if [ -z "${_extra_slots}" ]
+	then
+		if [ ${#} -ge 2 ]
+		then
+			printf '%s\n' "${2}" | /sbin/zfs load-key "${_root}"
+		else
+			/sbin/zfs load-key "${_root}"
+		fi
+		return $?
+	fi
+
+	if [ ${#} -ge 2 ]
+	then
+		_secret="${2}"
+	else
+		read -r _secret || return 1
+	fi
+
+	_pass_slots=$(printf '%s\n' "${_slot_list}" |
+	    awk -F'\t' '$2 == 3 { print $1 }')
+	[ -n "${_pass_slots}" ] || return 1
+
+	for _n in ${_pass_slots}
+	do
+		printf '%s\n' "${_secret}" |
+		    /sbin/zfs load-key -L prompt -S "${_n}" "${_root}" \
+		    2> /dev/null && return 0
+	done
+
+	return 1
+}
+
 while [ ! -e /run/zfs_unlock_complete ]; do
 	zfs_fs_name=$(cat /run/zfs_fs_name)
 	zfs_console_askpwd_cmd=$(cat /run/zfs_console_askpwd_cmd)
 	systemd-ask-password "Encrypted ZFS password for ${zfs_fs_name}:" | \
-		/sbin/zfs load-key "$zfs_fs_name" || true
+		unlock_with_secret "${zfs_fs_name}" || true
 	if [ "$(/sbin/zfs get -H -ovalue keystatus "$zfs_fs_name" 2> /dev/null)" = "available" ]; then
 		echo "Password for $zfs_fs_name accepted."
 		zfs_console_askpwd_pid=$(ps | awk '!'"/awk/ && /$zfs_console_askpwd_cmd/ { print \$1; exit }")
