@@ -416,6 +416,8 @@ get_usage(zfs_help_t idx)
 		    "\tkeyslot set -S <slot> -o keylocation=<value>\n"
 		    "\t    <filesystem|volume>\n"
 		    "\tkeyslot remove -S <slot> <filesystem|volume>\n"
+		    "\tkeyslot rewrap -S <slot> [-o keylocation=<value>]\n"
+		    "\t    [-o pbkdf2iters=<value>] <filesystem|volume>\n"
 		    "\tkeyslot list [-Hjp] <filesystem|volume>\n");
 	case HELP_VERSION:
 		return ("\tversion [-j]\n");
@@ -9279,7 +9281,7 @@ zfs_do_keyslot_set(zfs_handle_t *zhp, uint64_t slot, nvlist_t *props)
 }
 
 /*
- * zfs keyslot add|set|remove|list
+ * zfs keyslot add|set|remove|rewrap|list
  *
  * Slots are alternate wrappings of an encryption root's wrapping key, so every
  * verb targets the root itself; libzfs refuses a non-root and names the root.
@@ -9301,7 +9303,8 @@ zfs_do_keyslot(int argc, char **argv)
 
 	verb = argv[1];
 	if (strcmp(verb, "add") != 0 && strcmp(verb, "set") != 0 &&
-	    strcmp(verb, "remove") != 0 && strcmp(verb, "list") != 0) {
+	    strcmp(verb, "remove") != 0 && strcmp(verb, "rewrap") != 0 &&
+	    strcmp(verb, "list") != 0) {
 		(void) fprintf(stderr, "Invalid keyslot subcommand '%s'\n",
 		    verb);
 		usage(B_FALSE);
@@ -9311,7 +9314,8 @@ zfs_do_keyslot(int argc, char **argv)
 	argc--;
 	argv++;
 
-	if (strcmp(verb, "add") == 0 || strcmp(verb, "set") == 0) {
+	if (strcmp(verb, "add") == 0 || strcmp(verb, "set") == 0 ||
+	    strcmp(verb, "rewrap") == 0) {
 		props = fnvlist_alloc();
 		while ((c = getopt(argc, argv, "S:o:")) != -1) {
 			switch (c) {
@@ -9332,8 +9336,12 @@ zfs_do_keyslot(int argc, char **argv)
 			}
 		}
 
-		/* add may allocate a slot, set edits one that already exists */
-		if (strcmp(verb, "set") == 0 && slot == 0) {
+		/*
+		 * add may allocate a slot; set and rewrap edit one that already
+		 * exists, so they have nothing to do without -S.
+		 */
+		if ((strcmp(verb, "set") == 0 ||
+		    strcmp(verb, "rewrap") == 0) && slot == 0) {
 			(void) fprintf(stderr, "Missing -S <slot>\n");
 			usage(B_FALSE);
 		}
@@ -9401,6 +9409,11 @@ zfs_do_keyslot(int argc, char **argv)
 		ret = zfs_do_keyslot_set(zhp, slot, props);
 	} else if (strcmp(verb, "remove") == 0) {
 		ret = zfs_crypto_remove_keyslot(zhp, slot);
+	} else if (strcmp(verb, "rewrap") == 0) {
+		ret = zfs_crypto_rewrap_keyslot(zhp, slot, props);
+		if (ret == 0)
+			(void) printf("rewrapped key slot %llu of '%s'\n",
+			    (u_longlong_t)slot, zfs_get_name(zhp));
 	} else {
 		ret = zfs_do_keyslot_list(zhp, scripted, parsable, json);
 	}
