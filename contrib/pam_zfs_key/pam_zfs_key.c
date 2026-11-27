@@ -57,6 +57,7 @@ pam_syslog(pam_handle_t *pamh, int loglevel, const char *fmt, ...)
 #define	MAP_FLAGS MAP_PRIVATE | MAP_ANON | MAP_NOCORE
 #endif
 
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -249,54 +250,12 @@ pam_zfs_free(void)
 }
 
 static pw_password_t *
-prepare_passphrase(pam_handle_t *pamh, zfs_handle_t *ds,
-    const char *passphrase, nvlist_t *nvlist)
+derive_passphrase(pam_handle_t *pamh, const char *passphrase, uint64_t salt,
+    uint64_t iters)
 {
 	pw_password_t *key = alloc_pw_size(WRAPPING_KEY_LEN);
 	if (!key) {
 		return (NULL);
-	}
-	uint64_t salt;
-	uint64_t iters;
-	if (nvlist != NULL) {
-		int fd = open("/dev/urandom", O_RDONLY);
-		if (fd < 0) {
-			pw_free(key);
-			return (NULL);
-		}
-		int bytes_read = 0;
-		char *buf = (char *)&salt;
-		size_t bytes = sizeof (uint64_t);
-		while (bytes_read < bytes) {
-			ssize_t len = read(fd, buf + bytes_read, bytes
-			    - bytes_read);
-			if (len < 0) {
-				close(fd);
-				pw_free(key);
-				return (NULL);
-			}
-			bytes_read += len;
-		}
-		close(fd);
-
-		if (nvlist_add_uint64(nvlist,
-		    zfs_prop_to_name(ZFS_PROP_PBKDF2_SALT), salt)) {
-			pam_syslog(pamh, LOG_ERR,
-			    "failed to add salt to nvlist");
-			pw_free(key);
-			return (NULL);
-		}
-		iters = DEFAULT_PBKDF2_ITERATIONS;
-		if (nvlist_add_uint64(nvlist, zfs_prop_to_name(
-		    ZFS_PROP_PBKDF2_ITERS), iters)) {
-			pam_syslog(pamh, LOG_ERR,
-			    "failed to add iters to nvlist");
-			pw_free(key);
-			return (NULL);
-		}
-	} else {
-		salt = zfs_prop_get_int(ds, ZFS_PROP_PBKDF2_SALT);
-		iters = zfs_prop_get_int(ds, ZFS_PROP_PBKDF2_ITERS);
 	}
 
 	salt = LE_64(salt);
@@ -309,6 +268,155 @@ prepare_passphrase(pam_handle_t *pamh, zfs_handle_t *ds,
 		return (NULL);
 	}
 	return (key);
+}
+
+/*
+ * Derive a wrapping key from a passphrase. With an nvlist, a fresh salt and the
+ * default iteration count are generated and added to it, which is what
+ * change-key and keyslot add/rewrap need. Without one, the dataset's own
+ * properties are used: slot 1's salt and iterations.
+ */
+static pw_password_t *
+prepare_passphrase(pam_handle_t *pamh, zfs_handle_t *ds,
+    const char *passphrase, nvlist_t *nvlist)
+{
+	uint64_t salt;
+	uint64_t iters;
+
+	if (nvlist == NULL) {
+		salt = zfs_prop_get_int(ds, ZFS_PROP_PBKDF2_SALT);
+		iters = zfs_prop_get_int(ds, ZFS_PROP_PBKDF2_ITERS);
+		return (derive_passphrase(pamh, passphrase, salt, iters));
+	}
+
+	int fd = open("/dev/urandom", O_RDONLY);
+	if (fd < 0) {
+		return (NULL);
+	}
+	int bytes_read = 0;
+	char *buf = (char *)&salt;
+	size_t bytes = sizeof (uint64_t);
+	while (bytes_read < bytes) {
+		ssize_t len = read(fd, buf + bytes_read, bytes
+		    - bytes_read);
+		if (len < 0) {
+			close(fd);
+			return (NULL);
+		}
+		bytes_read += len;
+	}
+	close(fd);
+
+	if (nvlist_add_uint64(nvlist,
+	    zfs_prop_to_name(ZFS_PROP_PBKDF2_SALT), salt)) {
+		pam_syslog(pamh, LOG_ERR,
+		    "failed to add salt to nvlist");
+		return (NULL);
+	}
+	iters = DEFAULT_PBKDF2_ITERATIONS;
+	if (nvlist_add_uint64(nvlist, zfs_prop_to_name(
+	    ZFS_PROP_PBKDF2_ITERS), iters)) {
+		pam_syslog(pamh, LOG_ERR,
+		    "failed to add iters to nvlist");
+		return (NULL);
+	}
+
+	return (derive_passphrase(pamh, passphrase, salt, iters));
+}
+
+typedef struct {
+	uint64_t slot;
+	uint64_t salt;
+	uint64_t iters;
+} passphrase_slot_t;
+
+static int
+slot_compare(const void *a, const void *b)
+{
+	const passphrase_slot_t *sa = a;
+	const passphrase_slot_t *sb = b;
+
+	if (sa->slot < sb->slot)
+		return (-1);
+	if (sa->slot > sb->slot)
+		return (1);
+	return (0);
+}
+
+/*
+ * Collect the passphrase key slots of an encryption root, ascending, from the
+ * slot-list channel. Slot 1 is not in the channel; callers reach it through the
+ * dataset's properties. Slots whose parameters cannot be read are absent from
+ * the channel and are skipped. When any_extra is given it reports whether the
+ * root has slots beyond the primary one at all, whatever their format, which
+ * is the condition change-key refuses on.
+ *
+ * On success *slots_out is either NULL with *count_out 0, or a malloc'd array
+ * the caller frees.
+ */
+static int
+get_passphrase_slots(pam_handle_t *pamh, zfs_handle_t *ds,
+    passphrase_slot_t **slots_out, size_t *count_out, boolean_t *any_extra)
+{
+	nvlist_t *slots = NULL, *slotnvl;
+	nvpair_t *pair = NULL;
+	passphrase_slot_t *list = NULL, *grown;
+	size_t count = 0;
+	int ret;
+
+	*slots_out = NULL;
+	*count_out = 0;
+	if (any_extra != NULL)
+		*any_extra = B_FALSE;
+
+	ret = zfs_crypto_get_keyslots(ds, &slots);
+	if (ret != 0) {
+		pam_syslog(pamh, LOG_ERR, "failed to list key slots for %s: %d",
+		    zfs_get_name(ds), ret);
+		return (ret);
+	}
+
+	while ((pair = nvlist_next_nvpair(slots, pair)) != NULL) {
+		uint64_t slot, keyformat, salt, iters;
+
+		slot = strtoull(nvpair_name(pair), NULL, 10);
+		if (slot < 2)
+			continue;
+		if (any_extra != NULL)
+			*any_extra = B_TRUE;
+		if (nvpair_value_nvlist(pair, &slotnvl) != 0)
+			continue;
+		if (nvlist_lookup_uint64(slotnvl, "keyformat",
+		    &keyformat) != 0 ||
+		    keyformat != ZFS_KEYFORMAT_PASSPHRASE)
+			continue;
+		if (nvlist_lookup_uint64(slotnvl, "pbkdf2salt", &salt) != 0 ||
+		    nvlist_lookup_uint64(slotnvl, "pbkdf2iters", &iters) != 0)
+			continue;
+
+		grown = realloc(list, (count + 1) * sizeof (*list));
+		if (grown == NULL) {
+			free(list);
+			nvlist_free(slots);
+			pam_syslog(pamh, LOG_ERR,
+			    "out of memory listing key slots");
+			return (ENOMEM);
+		}
+		list = grown;
+		list[count].slot = slot;
+		list[count].salt = salt;
+		list[count].iters = iters;
+		count++;
+	}
+
+	nvlist_free(slots);
+
+	if (count > 1)
+		qsort(list, count, sizeof (*list), slot_compare);
+
+	*slots_out = list;
+	*count_out = count;
+	return (0);
 }
 
 static int
@@ -324,52 +432,193 @@ is_key_loaded(pam_handle_t *pamh, const char *ds_name)
 	return (keystatus != ZFS_KEYSTATUS_UNAVAILABLE);
 }
 
+/*
+ * Derive the new wrapping key for a passphrase with a fresh salt and the
+ * default iteration count, and add the properties a new or rewrapped
+ * passphrase slot needs. This is the same set change-key has always written.
+ */
+static pw_password_t *
+prepare_new_key(pam_handle_t *pamh, zfs_handle_t *ds, const char *passphrase,
+    nvlist_t *nvlist)
+{
+	pw_password_t *key = prepare_passphrase(pamh, ds, passphrase, nvlist);
+	if (key == NULL)
+		return (NULL);
+
+	if (nvlist_add_string(nvlist,
+	    zfs_prop_to_name(ZFS_PROP_KEYLOCATION), "prompt") != 0 ||
+	    nvlist_add_uint64(nvlist, zfs_prop_to_name(ZFS_PROP_KEYFORMAT),
+	    ZFS_KEYFORMAT_PASSPHRASE) != 0) {
+		pam_syslog(pamh, LOG_ERR, "failed to add key slot properties");
+		pw_free(key);
+		return (NULL);
+	}
+	return (key);
+}
+
+/*
+ * Identify the slot the old password unlocks, changing nothing: with the noop
+ * flag the kernel unwraps and verifies, then returns before installing. A
+ * real load would only return EEXIST, because at password-change time the home
+ * is already unlocked. Slot 1 is tested through the dataset's properties, the
+ * alternate slots through their own, ascending. Returns 0 with *slot 0 when
+ * nothing matches.
+ */
 static int
-change_key(pam_handle_t *pamh, const char *ds_name,
+find_key_slot(pam_handle_t *pamh, zfs_handle_t *ds, const char *passphrase,
+    uint64_t *slot, boolean_t *has_extra)
+{
+	const char *ds_name = zfs_get_name(ds);
+	passphrase_slot_t *slots = NULL;
+	size_t nslots = 0, i;
+	pw_password_t *key;
+	int ret;
+
+	*slot = 0;
+
+	/*
+	 * Reading the key format loads the handle's properties, which the
+	 * slot-list channel requires before it can be read.
+	 */
+	uint64_t keyformat = zfs_prop_get_int(ds, ZFS_PROP_KEYFORMAT);
+
+	ret = get_passphrase_slots(pamh, ds, &slots, &nslots, has_extra);
+	if (ret != 0)
+		return (ret);
+
+	/* the primary slot wins, and change-key's own path rekeys it */
+	if (keyformat == ZFS_KEYFORMAT_PASSPHRASE) {
+		key = prepare_passphrase(pamh, ds, passphrase, NULL);
+		if (key == NULL) {
+			free(slots);
+			return (EIO);
+		}
+		if (lzc_load_key(ds_name, B_TRUE, (uint8_t *)key->value,
+		    WRAPPING_KEY_LEN) == 0)
+			*slot = DSL_CRYPTO_KEY_SLOT_PRIMARY;
+		pw_free(key);
+		if (*slot != 0) {
+			free(slots);
+			return (0);
+		}
+	}
+
+	for (i = 0; i < nslots; i++) {
+		key = derive_passphrase(pamh, passphrase, slots[i].salt,
+		    slots[i].iters);
+		if (key == NULL)
+			continue;
+		ret = lzc_load_key_slot(ds_name, B_TRUE,
+		    (uint8_t *)key->value, WRAPPING_KEY_LEN, slots[i].slot);
+		pw_free(key);
+		if (ret == 0) {
+			*slot = slots[i].slot;
+			break;
+		}
+	}
+
+	free(slots);
+	return (0);
+}
+
+/* Today's password change: rekey slot 1 with lzc_change_key(). */
+static int
+rekey_primary(pam_handle_t *pamh, zfs_handle_t *ds, const char *passphrase)
+{
+	const char *ds_name = zfs_get_name(ds);
+	nvlist_t *nvlist = fnvlist_alloc();
+	pw_password_t *key = prepare_new_key(pamh, ds, passphrase, nvlist);
+	if (key == NULL) {
+		nvlist_free(nvlist);
+		return (EIO);
+	}
+	int ret = lzc_change_key(ds_name, DCP_CMD_NEW_KEY, nvlist,
+	    (uint8_t *)key->value, WRAPPING_KEY_LEN);
+	pw_free(key);
+	nvlist_free(nvlist);
+	if (ret != 0) {
+		pam_syslog(pamh, LOG_ERR,
+		    "'%s': rekeying the primary slot failed: %d", ds_name, ret);
+	}
+	return (ret);
+}
+
+/*
+ * Re-wrap alternate slot `slot` under the new password. The slot number and
+ * keyformat are preserved, wkey_1 and every other slot are untouched, and the
+ * location becomes prompt because that is the source PAM supplies.
+ */
+static int
+rewrap_slot(pam_handle_t *pamh, zfs_handle_t *ds, uint64_t slot,
     const char *passphrase)
+{
+	const char *ds_name = zfs_get_name(ds);
+	nvlist_t *nvlist = fnvlist_alloc();
+	pw_password_t *key = prepare_new_key(pamh, ds, passphrase, nvlist);
+	if (key == NULL) {
+		nvlist_free(nvlist);
+		return (EIO);
+	}
+	int ret = lzc_keyslot_rewrap(ds_name, slot, nvlist,
+	    (uint8_t *)key->value, WRAPPING_KEY_LEN);
+	pw_free(key);
+	nvlist_free(nvlist);
+	return (ret);
+}
+
+/*
+ * PAM-driven password change (design P5 section 14.6). The old password
+ * identifies the one slot that is rekeyed; nothing else is touched. The primary
+ * slot is only rekeyed when the root has no alternate slots, because change-key
+ * refuses in that state and PAM must not make that call on the owner's behalf.
+ */
+static int
+change_key(pam_handle_t *pamh, const char *ds_name, const char *old_pass,
+    const char *new_pass)
 {
 	zfs_handle_t *ds = zfs_open(g_zfs, ds_name, ZFS_TYPE_FILESYSTEM);
 	if (ds == NULL) {
 		pam_syslog(pamh, LOG_ERR, "dataset %s not found", ds_name);
 		return (-1);
 	}
-	nvlist_t *nvlist = fnvlist_alloc();
-	pw_password_t *key = prepare_passphrase(pamh, ds, passphrase, nvlist);
-	if (key == NULL) {
-		nvlist_free(nvlist);
+
+	uint64_t slot = 0;
+	boolean_t has_extra = B_FALSE;
+	int ret = find_key_slot(pamh, ds, old_pass, &slot, &has_extra);
+	if (ret != 0) {
 		zfs_close(ds);
 		return (-1);
 	}
-	if (nvlist_add_string(nvlist,
-	    zfs_prop_to_name(ZFS_PROP_KEYLOCATION),
-	    "prompt")) {
-		pam_syslog(pamh, LOG_ERR, "nvlist_add failed for keylocation");
-		pw_free(key);
-		nvlist_free(nvlist);
+
+	if (slot == 0) {
+		pam_syslog(pamh, LOG_ERR,
+		    "'%s': the old password does not unlock any key slot; "
+		    "nothing changed", ds_name);
 		zfs_close(ds);
 		return (-1);
 	}
-	if (nvlist_add_uint64(nvlist,
-	    zfs_prop_to_name(ZFS_PROP_KEYFORMAT),
-	    ZFS_KEYFORMAT_PASSPHRASE)) {
-		pam_syslog(pamh, LOG_ERR, "nvlist_add failed for keyformat");
-		pw_free(key);
-		nvlist_free(nvlist);
-		zfs_close(ds);
-		return (-1);
+
+	if (slot == DSL_CRYPTO_KEY_SLOT_PRIMARY) {
+		if (has_extra) {
+			pam_syslog(pamh, LOG_ERR,
+			    "'%s': the password matches the primary key "
+			    "slot and alternate key slots exist; refusing "
+			    "to rekey it", ds_name);
+			zfs_close(ds);
+			return (-1);
+		}
+		ret = rekey_primary(pamh, ds, new_pass);
+	} else {
+		ret = rewrap_slot(pamh, ds, slot, new_pass);
+		if (ret != 0) {
+			pam_syslog(pamh, LOG_ERR,
+			    "'%s': failed to rewrap key slot %llu: %d",
+			    ds_name, (u_longlong_t)slot, ret);
+		}
 	}
-	int ret = lzc_change_key(ds_name, DCP_CMD_NEW_KEY, nvlist,
-	    (uint8_t *)key->value, WRAPPING_KEY_LEN);
-	pw_free(key);
-	if (ret) {
-		pam_syslog(pamh, LOG_ERR, "change_key failed: %d", ret);
-		nvlist_free(nvlist);
-		zfs_close(ds);
-		return (-1);
-	}
-	nvlist_free(nvlist);
+
 	zfs_close(ds);
-	return (0);
+	return (ret == 0 ? 0 : -1);
 }
 
 typedef struct {
@@ -602,14 +851,53 @@ decrypt_mount(pam_handle_t *pamh, zfs_key_config_t *config, const char *ds_name,
 		pam_syslog(pamh, LOG_ERR, "dataset %s not found", ds_name);
 		return (-1);
 	}
-	pw_password_t *key = prepare_passphrase(pamh, ds, passphrase, NULL);
-	if (key == NULL) {
-		zfs_close(ds);
-		return (-1);
+	/*
+	 * Slot 1 is today's path, and the only slot a slotless deployment has.
+	 * It is skipped when it does not hold a passphrase: deriving against a
+	 * salt and iteration count of zero cannot succeed.
+	 */
+	int ret = EACCES;
+	pw_password_t *key;
+	if (zfs_prop_get_int(ds, ZFS_PROP_KEYFORMAT) ==
+	    ZFS_KEYFORMAT_PASSPHRASE) {
+		key = prepare_passphrase(pamh, ds, passphrase, NULL);
+		if (key == NULL) {
+			zfs_close(ds);
+			return (-1);
+		}
+		ret = lzc_load_key(ds_name, noop, (uint8_t *)key->value,
+		    WRAPPING_KEY_LEN);
+		pw_free(key);
 	}
-	int ret = lzc_load_key(ds_name, noop, (uint8_t *)key->value,
-	    WRAPPING_KEY_LEN);
-	pw_free(key);
+
+	/*
+	 * Then the alternate passphrase slots, ascending, each with its own
+	 * salt and iteration count. Only reached when slot 1 did not unlock
+	 * the root, so every case that worked before takes the path it always
+	 * did.
+	 */
+	if (ret != 0 && ret != EEXIST) {
+		passphrase_slot_t *slots = NULL;
+		size_t nslots = 0, i;
+
+		if (get_passphrase_slots(pamh, ds, &slots, &nslots,
+		    NULL) == 0) {
+			for (i = 0; i < nslots; i++) {
+				key = derive_passphrase(pamh, passphrase,
+				    slots[i].salt, slots[i].iters);
+				if (key == NULL)
+					continue;
+				ret = lzc_load_key_slot(ds_name, noop,
+				    (uint8_t *)key->value, WRAPPING_KEY_LEN,
+				    slots[i].slot);
+				pw_free(key);
+				if (ret == 0 || ret == EEXIST)
+					break;
+			}
+			free(slots);
+		}
+	}
+
 	if (ret && ret != EEXIST) {
 		pam_syslog(pamh, LOG_ERR, "load_key failed: %d", ret);
 		zfs_close(ds);
@@ -998,7 +1286,7 @@ chauthtok_callback(pam_handle_t *pamh, zfs_key_config_t *config,
 			return (-1);
 		}
 	}
-	int ret = change_key(pamh, dataset, ctx->new_pass);
+	int ret = change_key(pamh, dataset, ctx->old_pass, ctx->new_pass);
 	if (ret == -1) {
 		pam_syslog(pamh, LOG_ERR,
 		    "failed to change key for dataset '%s'", dataset);
