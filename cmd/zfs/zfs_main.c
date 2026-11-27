@@ -5921,7 +5921,8 @@ deleg_perm_comment(zfs_deleg_note_t note)
 		str = "Allows changing or adding an encryption key";
 		break;
 	case ZFS_DELEG_NOTE_KEYSLOT:
-		str = "Allows adding and removing encryption key slots";
+		str = "Allows adding, rewrapping and removing encryption key "
+		    "slots";
 		break;
 /*
  *	case ZFS_DELEG_NOTE_VSCAN:
