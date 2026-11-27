@@ -9411,9 +9411,6 @@ zfs_do_keyslot(int argc, char **argv)
 		ret = zfs_crypto_remove_keyslot(zhp, slot);
 	} else if (strcmp(verb, "rewrap") == 0) {
 		ret = zfs_crypto_rewrap_keyslot(zhp, slot, props);
-		if (ret == 0)
-			(void) printf("rewrapped key slot %llu of '%s'\n",
-			    (u_longlong_t)slot, zfs_get_name(zhp));
 	} else {
 		ret = zfs_do_keyslot_list(zhp, scripted, parsable, json);
 	}
