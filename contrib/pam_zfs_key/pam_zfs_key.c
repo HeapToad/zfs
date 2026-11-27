@@ -608,6 +608,13 @@ change_key(pam_handle_t *pamh, const char *ds_name, const char *old_pass,
 	}
 
 	if (slot == DSL_CRYPTO_KEY_SLOT_PRIMARY) {
+		/*
+		 * has_extra comes from the slot-list channel, which omits a
+		 * slot whose parameter entries are unreadable. If the only
+		 * extra slot is corrupt, has_extra is false here, but
+		 * lzc_change_key still refuses: the kernel scans WRAP_<n>, so
+		 * the slot is never rekeyed while extras exist.
+		 */
 		if (has_extra) {
 			pam_syslog(pamh, LOG_ERR,
 			    "'%s': the password matches the primary key "

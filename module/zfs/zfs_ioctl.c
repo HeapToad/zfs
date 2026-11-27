@@ -8042,6 +8042,9 @@ out:
  * derived in userspace and travels in hidden_args, like keyslot-add's; no key
  * material crosses this ioctl in either direction.
  *
+ * When props omits keylocation, the slot's existing keylocation_<n> is left in
+ * place; the in-tree callers always supply one, defaulting to prompt.
+ *
  * innvl: {
  *     "slot" -> uint64
  *         slot to rewrap; it must exist, and slot 1 cannot be rewrapped

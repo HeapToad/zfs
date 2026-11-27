@@ -2071,7 +2071,7 @@ zfs_crypto_rewrap_keyslot(zfs_handle_t *zhp, uint64_t slot, nvlist_t *props)
 	(void) nvlist_lookup_string(props,
 	    zfs_prop_to_name(ZFS_PROP_KEYLOCATION), &keylocation);
 	if (keylocation == NULL) {
-		keylocation = (char *)"prompt";
+		keylocation = "prompt";
 		ret = nvlist_add_string(props,
 		    zfs_prop_to_name(ZFS_PROP_KEYLOCATION), keylocation);
 		if (ret != 0)

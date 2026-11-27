@@ -64,8 +64,14 @@ unlock_root_with_stdin() {
     _root="${1}"
     _tty=no
     if [ -t 0 ]; then
+        # Refuse to read rather than echo the passphrase if echo cannot be
+        # turned off (stty missing, or unable to change the tty).
+        if ! command -v stty >/dev/null 2>&1 || ! stty -echo; then
+            printf "Cannot disable echo to read the passphrase for %s.\n" \
+                "${_root}" >&2
+            return 1
+        fi
         _tty=yes
-        stty -echo
     fi
     IFS= read -r _secret
     _ret=$?
