@@ -114,14 +114,13 @@ script.
 Slot 1 must therefore stay loadable without interaction if one of them is
 relied on, and an extra slot does not replace it.
 Interactive unlock paths do use the extra slots.
-The initramfs-tools boot script and the dracut hooks try each slot's stored
-source first and then offer one typed secret to every
+The initramfs-tools boot script, the dracut hooks and
+.Sy zfsunlock
+try each slot's stored source first and then offer one typed secret to every
 .Sy passphrase
 slot;
-.Sy zfsunlock
-and
 .Xr pam_zfs_key 8
-offer the secret to every
+offers the secret to every
 .Sy passphrase
 slot.
 A recovery passphrase held only in a slot above the primary one therefore

@@ -18,6 +18,33 @@ zfs_fs_name=""
 if [ ! -e /run/zfs_unlock_complete_notify ]; then
 	mkfifo /run/zfs_unlock_complete_notify
 fi
+
+#
+# Try every slot whose stored source is a file or an URL, ascending, as the
+# initramfs and dracut hooks do at boot (design §14.2). Returns 0 once one
+# loads the root; that covers slot 1's stored source, which this console has
+# always tried, and the alternate slots'. A root with none, or a zfs that
+# cannot list slots, falls through to the passphrase prompt.
+#
+unlock_stored_slots()
+{
+	_root="${1}"
+
+	_slot_list=$(/sbin/zfs keyslot list -Hp "${_root}" 2> /dev/null) || \
+	    _slot_list=""
+	_stored_slots=$(printf '%s\n' "${_slot_list}" |
+	    awk -F'\t' '$5 ~ /^(file|https?):\/\// { print $1 }')
+
+	for _n in ${_stored_slots}
+	do
+		/sbin/zfs load-key -S "${_n}" "${_root}" 2> /dev/null || :
+		[ "$(/sbin/zfs get -H -ovalue keystatus "${_root}" \
+		    2> /dev/null)" = "unavailable" ] || return 0
+	done
+
+	return 1
+}
+
 #
 # Try one secret against the key slots of an encryption root.
 #
@@ -79,12 +106,18 @@ unlock_with_secret()
 while [ ! -e /run/zfs_unlock_complete ]; do
 	zfs_fs_name=$(cat /run/zfs_fs_name)
 	zfs_console_askpwd_cmd=$(cat /run/zfs_console_askpwd_cmd)
-	# The retry loop is the error handling: every failure inside the
-	# function is checked, so errexit being disabled while it runs in a
-	# pipeline with || true is intended.
-	# shellcheck disable=SC2310
-	systemd-ask-password "Encrypted ZFS password for ${zfs_fs_name}:" | \
-		unlock_with_secret "${zfs_fs_name}" || true
+	# Stored sources first, as at boot (design §14.2): this restores the
+	# slot 1 file/URL attempt this console has always made and extends it
+	# to every stored slot. Prompt only if none unlocked the root.
+	unlock_stored_slots "${zfs_fs_name}" || :
+	if [ "$(/sbin/zfs get -H -ovalue keystatus "$zfs_fs_name" 2> /dev/null)" = "unavailable" ]; then
+		# The retry loop is the error handling: every failure inside the
+		# function is checked, so errexit being disabled while it runs in
+		# a pipeline with || true is intended.
+		# shellcheck disable=SC2310
+		systemd-ask-password "Encrypted ZFS password for ${zfs_fs_name}:" | \
+			unlock_with_secret "${zfs_fs_name}" || true
+	fi
 	if [ "$(/sbin/zfs get -H -ovalue keystatus "$zfs_fs_name" 2> /dev/null)" = "available" ]; then
 		echo "Password for $zfs_fs_name accepted."
 		zfs_console_askpwd_pid=$(ps | awk '!'"/awk/ && /$zfs_console_askpwd_cmd/ { print \$1; exit }")
