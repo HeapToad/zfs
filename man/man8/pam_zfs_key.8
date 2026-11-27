@@ -82,8 +82,8 @@ With extra slots, slot 1 is never rekeyed: the module refuses, because
 .Nm zfs Cm change-key
 refuses while those slots exist, and replacing the owner's primary secret is
 not the module's decision.
-A match on a slot above the primary one rewraps only that slot; its number and
-key format are kept, and its stored location becomes
+A match on a slot above the primary one rewraps only that slot; its number,
+key format and iteration count are kept, and its stored location becomes
 .Sy prompt ,
 which is the source the password prompt supplies.
 If more than one slot above the primary one holds the same password, only the

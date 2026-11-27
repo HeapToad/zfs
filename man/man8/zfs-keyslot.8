@@ -303,11 +303,9 @@ file is unchanged.
 The number of PBKDF2 iterations used to derive a
 .Sy passphrase
 slot's new key.
-If the option is not given the default count is used, as for
-.Nm zfs Cm create
-and
-.Nm zfs Cm change-key ,
-so a raised count is reset unless it is given again.
+If the option is not given the slot's current count is preserved, so a rewrap
+changes the secret without changing the slot's work factor.
+Give this option to raise or lower the count deliberately.
 .El
 .Pp
 A slot's key format is fixed when the slot is created, so

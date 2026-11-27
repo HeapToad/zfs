@@ -1941,6 +1941,7 @@ zfs_crypto_rewrap_keyslot(zfs_handle_t *zhp, uint64_t slot, nvlist_t *props)
 	char num[32];
 	nvlist_t *typed_props = NULL, *slots = NULL, *slotnvl = NULL;
 	uint64_t keyformat = ZFS_KEYFORMAT_NONE;
+	uint64_t iters = 0;
 	const char *keylocation = NULL;
 	uint8_t *key_data = NULL;
 	uint_t key_datalen = 0;
@@ -2040,6 +2041,7 @@ zfs_crypto_rewrap_keyslot(zfs_handle_t *zhp, uint64_t slot, nvlist_t *props)
 		goto error;
 	}
 	(void) nvlist_lookup_uint64(slotnvl, "keyformat", &keyformat);
+	(void) nvlist_lookup_uint64(slotnvl, "pbkdf2iters", &iters);
 
 	/*
 	 * A slot that is in the channel but whose stored type is not one we
@@ -2077,10 +2079,30 @@ zfs_crypto_rewrap_keyslot(zfs_handle_t *zhp, uint64_t slot, nvlist_t *props)
 	}
 
 	/*
-	 * New secret, new salt, new IV. An omitted pbkdf2iters takes the
-	 * default, as for change-key and keyslot add: a rewrap is a
-	 * re-derivation, not a change of the slot's policy (L-D3).
+	 * A rewrap changes the secret, not the slot's work factor: an omitted
+	 * pbkdf2iters keeps the slot's current count instead of resetting it to
+	 * the default, so a hardened slot is not silently weakened. An explicit
+	 * -o overrides it. Only passphrase slots carry a count; for raw/hex the
+	 * helper requires pbkdf2iters absent, so nothing is injected.
 	 */
+	if (keyformat == ZFS_KEYFORMAT_PASSPHRASE &&
+	    !nvlist_exists(props, zfs_prop_to_name(ZFS_PROP_PBKDF2_ITERS))) {
+		if (iters < MIN_PBKDF2_ITERATIONS) {
+			zfs_error_aux(zhp->zfs_hdl,
+			    "key slot %llu has pbkdf2iters %llu below the "
+			    "minimum %d; specify -o pbkdf2iters",
+			    (u_longlong_t)slot, (u_longlong_t)iters,
+			    MIN_PBKDF2_ITERATIONS);
+			ret = EINVAL;
+			goto error;
+		}
+		ret = nvlist_add_uint64(props,
+		    zfs_prop_to_name(ZFS_PROP_PBKDF2_ITERS), iters);
+		if (ret != 0)
+			goto error;
+	}
+
+	/* new secret, new salt, new IV; the iteration count is set above */
 	ret = populate_create_encryption_params_nvlists(zhp->zfs_hdl, zhp,
 	    B_TRUE, keyformat, keylocation, props, &key_data, &key_datalen);
 	if (ret != 0)

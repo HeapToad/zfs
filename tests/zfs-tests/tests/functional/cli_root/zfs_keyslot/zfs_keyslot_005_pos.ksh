@@ -32,7 +32,8 @@
 #    iteration count.
 # 3. Rewrap slot 2 to a new passphrase, naming no properties: the slot list,
 #    the key format and the set of key objects are unchanged, the salt is new,
-#    and the iteration count becomes the default rather than the 200000 it held.
+#    and the iteration count is preserved at the 200000 it held; an explicit
+#    -o pbkdf2iters overrides it.
 # 4. The old passphrase is refused and installs nothing; the new one unlocks
 #    the root and the child; slot 1 still unlocks with its own key; and every
 #    key object except the root's is byte-identical.
@@ -151,16 +152,14 @@ log_must test "$(keyslot_slots $encroot)" = "1,2,3"
 log_must test "$(slot_field $encroot 2 2)" = "3"
 log_must test "$(slot_field $encroot 2 5)" = "prompt"
 log_must test "$(slot_field $encroot 2 3)" != "$salt_before"
-log_must test "$(slot_field $encroot 2 4)" != "$iters_before"
+log_must test "$(slot_field $encroot 2 4)" = "$iters_before"
 
 #
-# The count it now holds is the default, not the slot's previous value: a fresh
-# slot created with no -o records the same count.
+# An explicit -o overrides the preserved count; the new secret still unlocks.
 #
-log_must eval "echo 'calibrationpass' | zfs keyslot add -S 4 \
-    -o keyformat=passphrase -o keylocation=prompt $encroot"
-log_must test "$(slot_field $encroot 2 4)" = "$(slot_field $encroot 4 4)"
-log_must zfs keyslot remove -S 4 $encroot
+log_must eval "echo '$newpass' | zfs keyslot rewrap -S 2 \
+    -o pbkdf2iters=400000 $encroot"
+log_must test "$(slot_field $encroot 2 4)" = "400000"
 
 # the same key objects, and the root's is still the one carrying the slots
 log_must test "$(keyslot_key_objs $TESTPOOL)" = "$objs_before"

@@ -271,17 +271,17 @@ derive_passphrase(pam_handle_t *pamh, const char *passphrase, uint64_t salt,
 }
 
 /*
- * Derive a wrapping key from a passphrase. With an nvlist, a fresh salt and the
- * default iteration count are generated and added to it, which is what
- * change-key and keyslot add/rewrap need. Without one, the dataset's own
- * properties are used: slot 1's salt and iterations.
+ * Derive a wrapping key from a passphrase. With an nvlist, a fresh salt is
+ * generated and, together with the caller's iteration count, added to it; the
+ * count is DEFAULT_PBKDF2_ITERATIONS for a new or rekeyed slot and the slot's
+ * current count for a rewrap that preserves it. Without an nvlist, the
+ * dataset's own properties are used: slot 1's salt and iterations.
  */
 static pw_password_t *
 prepare_passphrase(pam_handle_t *pamh, zfs_handle_t *ds,
-    const char *passphrase, nvlist_t *nvlist)
+    const char *passphrase, nvlist_t *nvlist, uint64_t iters)
 {
 	uint64_t salt;
-	uint64_t iters;
 
 	if (nvlist == NULL) {
 		salt = zfs_prop_get_int(ds, ZFS_PROP_PBKDF2_SALT);
@@ -313,7 +313,6 @@ prepare_passphrase(pam_handle_t *pamh, zfs_handle_t *ds,
 		    "failed to add salt to nvlist");
 		return (NULL);
 	}
-	iters = DEFAULT_PBKDF2_ITERATIONS;
 	if (nvlist_add_uint64(nvlist, zfs_prop_to_name(
 	    ZFS_PROP_PBKDF2_ITERS), iters)) {
 		pam_syslog(pamh, LOG_ERR,
@@ -433,15 +432,18 @@ is_key_loaded(pam_handle_t *pamh, const char *ds_name)
 }
 
 /*
- * Derive the new wrapping key for a passphrase with a fresh salt and the
- * default iteration count, and add the properties a new or rewrapped
- * passphrase slot needs. This is the same set change-key has always written.
+ * Derive the new wrapping key for a passphrase with a fresh salt and the given
+ * iteration count, and add the properties a new or rewrapped passphrase slot
+ * needs. The count is the default for a rekeyed primary slot and the matched
+ * slot's current count for a rewrap, so a password change keeps the slot's
+ * work factor.
  */
 static pw_password_t *
 prepare_new_key(pam_handle_t *pamh, zfs_handle_t *ds, const char *passphrase,
-    nvlist_t *nvlist)
+    nvlist_t *nvlist, uint64_t iters)
 {
-	pw_password_t *key = prepare_passphrase(pamh, ds, passphrase, nvlist);
+	pw_password_t *key = prepare_passphrase(pamh, ds, passphrase, nvlist,
+	    iters);
 	if (key == NULL)
 		return (NULL);
 
@@ -462,11 +464,12 @@ prepare_new_key(pam_handle_t *pamh, zfs_handle_t *ds, const char *passphrase,
  * real load would only return EEXIST, because at password-change time the home
  * is already unlocked. Slot 1 is tested through the dataset's properties, the
  * alternate slots through their own, ascending. Returns 0 with *slot 0 when
- * nothing matches.
+ * nothing matches; *iters_out carries the matched alternate slot's iteration
+ * count (0 when the primary slot matched or nothing did).
  */
 static int
 find_key_slot(pam_handle_t *pamh, zfs_handle_t *ds, const char *passphrase,
-    uint64_t *slot, boolean_t *has_extra)
+    uint64_t *slot, boolean_t *has_extra, uint64_t *iters_out)
 {
 	const char *ds_name = zfs_get_name(ds);
 	passphrase_slot_t *slots = NULL;
@@ -475,6 +478,7 @@ find_key_slot(pam_handle_t *pamh, zfs_handle_t *ds, const char *passphrase,
 	int ret;
 
 	*slot = 0;
+	*iters_out = 0;
 
 	/*
 	 * Reading the key format loads the handle's properties, which the
@@ -488,7 +492,7 @@ find_key_slot(pam_handle_t *pamh, zfs_handle_t *ds, const char *passphrase,
 
 	/* the primary slot wins, and change-key's own path rekeys it */
 	if (keyformat == ZFS_KEYFORMAT_PASSPHRASE) {
-		key = prepare_passphrase(pamh, ds, passphrase, NULL);
+		key = prepare_passphrase(pamh, ds, passphrase, NULL, 0);
 		if (key == NULL) {
 			free(slots);
 			return (EIO);
@@ -513,6 +517,7 @@ find_key_slot(pam_handle_t *pamh, zfs_handle_t *ds, const char *passphrase,
 		pw_free(key);
 		if (ret == 0) {
 			*slot = slots[i].slot;
+			*iters_out = slots[i].iters;
 			break;
 		}
 	}
@@ -527,7 +532,8 @@ rekey_primary(pam_handle_t *pamh, zfs_handle_t *ds, const char *passphrase)
 {
 	const char *ds_name = zfs_get_name(ds);
 	nvlist_t *nvlist = fnvlist_alloc();
-	pw_password_t *key = prepare_new_key(pamh, ds, passphrase, nvlist);
+	pw_password_t *key = prepare_new_key(pamh, ds, passphrase, nvlist,
+	    DEFAULT_PBKDF2_ITERATIONS);
 	if (key == NULL) {
 		nvlist_free(nvlist);
 		return (EIO);
@@ -544,17 +550,20 @@ rekey_primary(pam_handle_t *pamh, zfs_handle_t *ds, const char *passphrase)
 }
 
 /*
- * Re-wrap alternate slot `slot` under the new password. The slot number and
- * keyformat are preserved, wkey_1 and every other slot are untouched, and the
- * location becomes prompt because that is the source PAM supplies.
+ * Re-wrap alternate slot `slot` under the new password. The slot number,
+ * keyformat and iteration count are preserved, wkey_1 and every other slot are
+ * untouched, and the location becomes prompt because that is the source PAM
+ * supplies. The new key is derived with the slot's own iteration count so it
+ * matches what load-key will later use.
  */
 static int
 rewrap_slot(pam_handle_t *pamh, zfs_handle_t *ds, uint64_t slot,
-    const char *passphrase)
+    const char *passphrase, uint64_t iters)
 {
 	const char *ds_name = zfs_get_name(ds);
 	nvlist_t *nvlist = fnvlist_alloc();
-	pw_password_t *key = prepare_new_key(pamh, ds, passphrase, nvlist);
+	pw_password_t *key = prepare_new_key(pamh, ds, passphrase, nvlist,
+	    iters);
 	if (key == NULL) {
 		nvlist_free(nvlist);
 		return (EIO);
@@ -582,9 +591,9 @@ change_key(pam_handle_t *pamh, const char *ds_name, const char *old_pass,
 		return (-1);
 	}
 
-	uint64_t slot = 0;
+	uint64_t slot = 0, iters = 0;
 	boolean_t has_extra = B_FALSE;
-	int ret = find_key_slot(pamh, ds, old_pass, &slot, &has_extra);
+	int ret = find_key_slot(pamh, ds, old_pass, &slot, &has_extra, &iters);
 	if (ret != 0) {
 		zfs_close(ds);
 		return (-1);
@@ -609,7 +618,7 @@ change_key(pam_handle_t *pamh, const char *ds_name, const char *old_pass,
 		}
 		ret = rekey_primary(pamh, ds, new_pass);
 	} else {
-		ret = rewrap_slot(pamh, ds, slot, new_pass);
+		ret = rewrap_slot(pamh, ds, slot, new_pass, iters);
 		if (ret != 0) {
 			pam_syslog(pamh, LOG_ERR,
 			    "'%s': failed to rewrap key slot %llu: %d",
@@ -860,7 +869,7 @@ decrypt_mount(pam_handle_t *pamh, zfs_key_config_t *config, const char *ds_name,
 	pw_password_t *key;
 	if (zfs_prop_get_int(ds, ZFS_PROP_KEYFORMAT) ==
 	    ZFS_KEYFORMAT_PASSPHRASE) {
-		key = prepare_passphrase(pamh, ds, passphrase, NULL);
+		key = prepare_passphrase(pamh, ds, passphrase, NULL, 0);
 		if (key == NULL) {
 			zfs_close(ds);
 			return (-1);
