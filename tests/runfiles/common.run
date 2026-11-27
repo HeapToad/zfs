@@ -277,7 +277,7 @@ tags = ['functional', 'cli_root', 'zfs_inherit']
 
 [tests/functional/cli_root/zfs_keyslot]
 tests = ['zfs_keyslot_001_pos', 'zfs_keyslot_002_pos',
-    'zfs_keyslot_003_pos', 'zfs_keyslot_004_pos']
+    'zfs_keyslot_003_pos', 'zfs_keyslot_004_pos', 'zfs_keyslot_005_pos']
 tags = ['functional', 'cli_root', 'zfs_keyslot']
 
 [tests/functional/cli_root/zfs_list]
