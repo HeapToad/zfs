@@ -109,6 +109,9 @@ while [ ! -e /run/zfs_unlock_complete ]; do
 	# Stored sources first, as at boot (design §14.2): this restores the
 	# slot 1 file/URL attempt this console has always made and extends it
 	# to every stored slot. Prompt only if none unlocked the root.
+	# Best effort: unlock_stored_slots' own failures are handled below by
+	# checking keystatus, so errexit being disabled by the || is intended.
+	# shellcheck disable=SC2310
 	unlock_stored_slots "${zfs_fs_name}" || :
 	if [ "$(/sbin/zfs get -H -ovalue keystatus "$zfs_fs_name" 2> /dev/null)" = "unavailable" ]; then
 		# The retry loop is the error handling: every failure inside the
