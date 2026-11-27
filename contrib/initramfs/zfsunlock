@@ -79,6 +79,10 @@ unlock_with_secret()
 while [ ! -e /run/zfs_unlock_complete ]; do
 	zfs_fs_name=$(cat /run/zfs_fs_name)
 	zfs_console_askpwd_cmd=$(cat /run/zfs_console_askpwd_cmd)
+	# The retry loop is the error handling: every failure inside the
+	# function is checked, so errexit being disabled while it runs in a
+	# pipeline with || true is intended.
+	# shellcheck disable=SC2310
 	systemd-ask-password "Encrypted ZFS password for ${zfs_fs_name}:" | \
 		unlock_with_secret "${zfs_fs_name}" || true
 	if [ "$(/sbin/zfs get -H -ovalue keystatus "$zfs_fs_name" 2> /dev/null)" = "available" ]; then
