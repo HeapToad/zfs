@@ -153,6 +153,23 @@ log_must test "$(zfs keyslot list -H -p $encroot | \
     awk -F'\t' 'NF != 5' | wc -l)" -eq 0
 log_must eval "zfs keyslot list -j $encroot | grep -q 'keyslots'"
 log_must eval "zfs keyslot list -j $encroot | grep -q '\"4\":'"
+# The boot and login scripts decide whether a root has extra slots with
+# NR > 1, so the first row must be slot 1; slot 1 is always listed first.
+log_must test "$(zfs keyslot list -Hp $encroot | head -n 1 | cut -f 1)" = "1"
+# -j is valid JSON keyed by the slot number: every entry carries the five
+# documented fields, -p makes keyformat a number, and the schema version is
+# present. jq exits nonzero on invalid JSON, so this also rejects malformed
+# output.
+log_must eval "zfs keyslot list -j $encroot | jq -e \
+    '.output_version | has(\"command\") and has(\"vers_major\") and \
+    has(\"vers_minor\")' > /dev/null"
+log_must eval "zfs keyslot list -jp $encroot | jq -e \
+    '.keyslots[\"4\"] | has(\"slot\") and has(\"keyformat\") and \
+    has(\"pbkdf2salt\") and has(\"pbkdf2iters\") and has(\"keylocation\")' \
+    > /dev/null"
+log_must eval "zfs keyslot list -jp $encroot | jq -e \
+    '.keyslots[\"1\"].slot == 1 and .keyslots[\"4\"].slot == 4 and \
+    .keyslots[\"4\"].keyformat == 1' > /dev/null"
 
 #
 # 5. Refusals.
