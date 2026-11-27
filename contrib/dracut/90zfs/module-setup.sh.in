@@ -33,7 +33,8 @@ install() {
 		awk \
 		tr \
 		cut \
-		head ||
+		head \
+		stty ||
 		{ dfatal "Failed to install essential binaries"; exit 1; }
 
 	# Adapted from https://github.com/zbm-dev/zfsbootmenu

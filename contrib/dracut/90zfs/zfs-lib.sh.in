@@ -64,6 +64,39 @@ for_relevant_root_children() {
         )
 }
 
+# try_passphrase_slots ENCRYPTIONROOT [SECRET]
+#   Tries one secret against every passphrase slot of the encryption root and
+#   stops at the first that accepts it. Without SECRET the secret is read from
+#   standard input, which is how a prompter is piped in.
+#
+#   The slot list is the only source of slot facts: a slot that is not listed
+#   is skipped, never guessed at. -L prompt is required, otherwise a slot with
+#   a stored source would read that file instead of the typed secret. A failed
+#   attempt is silent because a wrong secret fails once per slot; the caller
+#   reports one failure per prompt.
+try_passphrase_slots() {
+    _root="${1}"
+
+    if [ $# -ge 2 ]; then
+        _secret="${2}"
+    else
+        # IFS is cleared so the secret keeps its own leading and trailing
+        # spaces, which load-key would have preserved.
+        IFS= read -r _secret || return 1
+    fi
+
+    _pass_slots="$(zfs keyslot list -Hp "${_root}" 2>/dev/null |
+        awk -F"${TAB}" '$2 == 3 { print $1 }')"
+    [ -n "${_pass_slots}" ] || return 1
+
+    for _n in ${_pass_slots}; do
+        printf '%s\n' "${_secret}" |
+            zfs load-key -L prompt -S "${_n}" "${_root}" 2>/dev/null && return 0
+    done
+
+    return 1
+}
+
 # Parse root=, rootfstype=, return them decoded and normalised to zfs:AUTO for auto, plain dset for explicit
 #
 # True if ZFS-on-root, false if we shouldn't

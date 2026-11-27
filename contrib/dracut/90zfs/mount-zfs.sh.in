@@ -55,6 +55,28 @@ ask_for_password() {
     return "$ret"
 }
 
+# unlock_root_with_stdin ROOT
+#   Reads one secret and tries it against the root's passphrase slots. This is
+#   ask_for_password's command: plymouth pipes the secret in, while on the
+#   console path standard input is the tty, where echo is turned off around
+#   the read.
+unlock_root_with_stdin() {
+    _root="${1}"
+    _tty=no
+    if [ -t 0 ]; then
+        _tty=yes
+        stty -echo
+    fi
+    IFS= read -r _secret
+    _ret=$?
+    if [ "${_tty}" = yes ]; then
+        stty echo
+        printf '\n' >&2
+    fi
+    [ "${_ret}" -eq 0 ] || return 1
+    try_passphrase_slots "${_root}" "${_secret}"
+}
+
 
 # Delay until all required block devices are present.
 modprobe zfs 2>/dev/null
@@ -102,10 +124,18 @@ if [ "$(zpool get -Ho value feature@encryption "${ZFS_POOL}")" = 'active' ]; the
 		# if the key needs to be loaded
 		if [ "$KEYSTATUS" = "unavailable" ]; then
 			# decrypt them
+			# A slotted root needs the slot loop; one without extra
+			# slots keeps the single load-key it always ran.
+			SLOTS="$(zfs keyslot list -Hp "${ENCRYPTIONROOT}" 2>/dev/null)" || SLOTS=""
+			if [ -n "$(printf '%s\n' "${SLOTS}" | awk -F"${TAB}" 'NR > 1 { print "yes"; exit }')" ]; then
+				CMD="unlock_root_with_stdin '${ENCRYPTIONROOT}'"
+			else
+				CMD="zfs load-key '${ENCRYPTIONROOT}'"
+			fi
 			ask_for_password \
 				5 \
 				"Encrypted ZFS password for ${ENCRYPTIONROOT}: " \
-				"zfs load-key '${ENCRYPTIONROOT}'"
+				"${CMD}"
 		fi
 	fi
 fi
