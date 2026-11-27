@@ -614,8 +614,13 @@ decrypt_fs()
 			    awk -F'\t' 'NR > 1 { print "yes"; exit }')"
 			if [ -n "${_extra_slots}" ]
 			then
+				# decrypt_slots reports whether the key ended up
+				# available; return that rather than claiming
+				# success. The mount that follows is the real
+				# gate and this stub has no set -e, but the
+				# status should still be true.
 				decrypt_slots "${ENCRYPTIONROOT}" "${_slot_list}"
-				return 0
+				return $?
 			fi
 
 			# Do not prompt if key is stored noninteractively,
