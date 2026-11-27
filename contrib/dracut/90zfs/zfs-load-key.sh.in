@@ -73,11 +73,13 @@ _load_key_cb() {
     # multiply a boot-critical delay by the number of slots.
     try_stored_slots "${ENCRYPTIONROOT}" "${SLOTS}" && return 0
 
-    # Then one typed secret, offered to every passphrase slot.
+    # Then one typed secret, offered to every passphrase slot. Success is
+    # keystatus, not the exit status alone (design P5 §14.2 step 4).
     if [ -n "$(printf '%s\n' "${SLOTS}" | awk -F"${TAB}" '$2 == 3 { print "yes"; exit }')" ]; then
         for _ in 1 2 3; do
             systemd-ask-password --timeout=0 --no-tty "Encrypted ZFS password for ${dataset}" |
-                try_passphrase_slots "${ENCRYPTIONROOT}" && break
+                try_passphrase_slots "${ENCRYPTIONROOT}"
+            [ "$(zfs get -Ho value keystatus "${ENCRYPTIONROOT}")" = "unavailable" ] || break
         done
     fi
 }

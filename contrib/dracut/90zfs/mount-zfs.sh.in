@@ -75,6 +75,9 @@ unlock_root_with_stdin() {
     fi
     [ "${_ret}" -eq 0 ] || return 1
     try_passphrase_slots "${_root}" "${_secret}"
+    # Success is keystatus, not the exit status alone (design P5 §14.2 step 4).
+    [ "$(zfs get -Ho value keystatus "${_root}")" = "unavailable" ] && return 1
+    return 0
 }
 
 
