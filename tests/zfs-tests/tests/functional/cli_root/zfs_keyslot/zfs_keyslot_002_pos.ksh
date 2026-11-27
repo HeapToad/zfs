@@ -128,6 +128,8 @@ log_must test "$kf" = "3"
 log_must test "$salt" -ne 0
 log_must test "$loc" = "file://$TESTDIR/pass key"
 
+# zfs create mounted it, and unload-key refuses a mounted dataset
+log_must zfs unmount $passroot
 log_must zfs unload-key $passroot
 log_must zfs load-key -S 2 $passroot
 log_must key_available $passroot
