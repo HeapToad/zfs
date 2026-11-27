@@ -1327,10 +1327,18 @@ writes it together with the slot's new material
 .Nm zfs Cm set
 also accepts it directly.
 It is sent and received with
-.Nm zfs Cm send Fl p ,
-and changes are authorized by the
+.Nm zfs Cm send Fl p .
+Changes made with
+.Nm zfs Cm set
+and
+.Nm zfs Cm keyslot Cm set
+are authorized by the
 .Sy keylocation
-permission.
+permission, while adding or rewrapping a slot requires
+.Sy keyslot
+.Po see
+.Xr zfs-keyslot 8
+.Pc .
 .It Sy pbkdf2iters Ns = Ns Ar iterations
 Controls the number of PBKDF2 iterations that a
 .Sy passphrase

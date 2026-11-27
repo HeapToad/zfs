@@ -258,7 +258,8 @@ first.
 .It Fl S Ar slot
 The slot to rewrap.
 This option is required, and the slot must exist.
-Slot 1 cannot be rewrapped: its entries wrap the master key, which
+Slot 0 is not a slot, and slot 1 cannot be rewrapped: its entries wrap the
+master key, which
 .Nm zfs Cm change-key
 replaces.
 .It Fl o Ar keylocation Ns = Ns Ar value
@@ -284,6 +285,13 @@ so a raised count is reset unless it is given again.
 A slot's key format is fixed when the slot is created, so
 .Fl o Ar keyformat
 is refused.
+.Fl o Ar keylocation
+and
+.Fl o Ar pbkdf2iters
+are the only properties accepted, and a location of
+.Sy none
+is refused as it is for
+.Nm zfs Cm keyslot Cm add .
 .Pp
 The command fails if the
 .Sy keyslots
